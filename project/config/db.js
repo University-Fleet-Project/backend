@@ -1,25 +1,23 @@
 // config/db.js
 const { Pool } = require('pg');
+require('dotenv').config({ path: '../.env' }); // استدعاء مكتبة dotenv لقراءة المتغيرات الأمنية
 
-// SQL Database configuration
+// إعداد الاتصال الديناميكي المتوافق مع الـ Docker والـ Local setup
 const pool = new Pool({
-    user: 'postgres',
-    host: 'localhost',
-    database: 'fleet_db',
-    password: '1234', // ⚠️ اكتب الباسورد بتاعك هنا
-    port: 5432,
+    user: process.env.DB_USER || 'postgres',
+    host: process.env.DB_HOST || 'localhost',
+    database: process.env.DB_DATABASE || 'fleet_db',
+    password: process.env.DB_PASSWORD || '1234', // القيمة الاحتياطية لو الـ .env مش مقروء
+    port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 5432,
 });
 
-// Database connection check - Clean English Output Only
+// فحص الاتصال النظيف للتأكد من تشغيل السيرفر
 pool.query('SELECT NOW()', (err, res) => {
     if (err) {
         console.error('❌ Database connection error:', err.message);
     } else {
-        // السطر ده تم تحويله للإنجليزي تماماً عشان يظهر نظيف في الـ Terminal
-        console.log('🔌 PostgreSQL database connected successfully!');
+        console.log('🔌 PostgreSQL database connected dynamic-ready successfully!');
     }
 });
 
 module.exports = pool;
-
-

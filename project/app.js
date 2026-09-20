@@ -1,30 +1,33 @@
 // app.js
-
+require('dotenv').config();
 const express = require('express');
+const cors = require('cors'); // استدعاء مكتبة فتح الحماية للأجهزة الخارجية
 const app = express();
 
-// 1. استدعاء الموزعات والـ الروابط (Routes) من الفولدرات
+// تفعيل الـ CORS عشان جهاز عبد الرحمن يقدر يسحب داتا من جهازك علطول
+app.use(cors());
+
+// 1. استدعاء الموزعات والروابط (Routes) من الفولدرات
 const usersRouter = require('./routes/users');
 const vehiclesRouter = require('./routes/vehicles');
 const reservationsRouter = require('./routes/reservations');
-const tripsRouter = require('./routes/trips'); // سطر استدعاء الرحلات المظبوط
+const tripsRouter = require('./routes/trips');
 
 // 2. المترجم السحري لقراءة داتا الـ JSON الجاية من الفلاتر
 app.use(express.json());
 
-// 3. ربط وبناء بوابات العناوين الرئيسية للسيستم (ترتيب فسيولوجي نظيف)
-app.use('/api/users', usersRouter);              // شاشات اللوجن والريجيستر
-app.use('/api/vehicles', vehiclesRouter);        // شاشات الكتالوج والتفاصيل
-app.use('/api/reservations', reservationsRouter);  // شاشات تقديم الحجز وموافقة المدير
-app.use('/api/trips', tripsRouter);              // شاشات السائق وتحديثات العداد
+// 3. ربط وبناء بوابات العناوين الرئيسية للسيستم
+app.use('/api/users', usersRouter);
+app.use('/api/vehicles', vehiclesRouter);
+app.use('/api/reservations', reservationsRouter);
+app.use('/api/trips', tripsRouter);
 
-// 4. رابط تجريبي سريع تفتحه من المتصفح للتأكد إن السيرفر قايم
+// 4. رابط تجريبي سريع للتأكد إن السيرفر قايم
 app.get('/', (req, res) => {
     res.send('🚀 University Fleet Management Server is running successfully!');
 });
 
 // 🚨 5. معالجة مشكلة العناوين والروابط الخاطئة (404 Page Not Found)
-// الترتيب هنا حاسم: لازم تكون تحت البوابات الكبيرة علطول لحمايتها
 app.use((req, res, next) => {
     res.status(404).json({
         success: false,
@@ -41,7 +44,7 @@ app.use((err, req, res, next) => {
     });
 });
 
-// 🚀 7. تشغيل موتور السيرفر وفتح البوابة 3000 (آخر سطر رسمي في الملف)
+// 🚀 7. تشغيل موتور السيرفر وفتح البوابة 3000
 const PORT = 3000;
 app.listen(PORT, () => {
     console.log(`🚀 Server is running on port ${PORT}!`);
