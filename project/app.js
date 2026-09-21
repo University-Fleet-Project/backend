@@ -44,8 +44,13 @@ app.use((err, req, res, next) => {
     });
 });
 
-// 🚀 7. تشغيل موتور السيرفر وفتح البوابة 3000
-const PORT = 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Server is running on port ${PORT}!`);
-});
+// 🚀 7. تشغيل السيرفر محليًا، وتصدير الـ app لـ Vercel
+const PORT = process.env.PORT || 3000;
+
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`🚀 Server is running on port ${PORT}!`);
+    });
+}
+
+module.exports = app;
