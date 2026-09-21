@@ -10,6 +10,7 @@ Backend service for the University Fleet Management System.
 * Docker
 * Docker Compose
 * GitHub Actions
+* Vercel
 
 ## Project Structure
 
@@ -18,6 +19,7 @@ Backend service for the University Fleet Management System.
 * `project/routes/` - API routes
 * `project/scripts/` - Database seed scripts
 * `project/schema.sql` - Database schema
+* `project/api/` - Vercel serverless entry point
 * `.github/workflows/` - CI workflow
 
 ## Environment Variables
@@ -39,6 +41,8 @@ Do not commit `.env` or any real credentials to GitHub.
 
 The `.env` file is excluded through `.gitignore`.
 
+For deployment, production environment variables must be configured through the deployment platform's environment variable settings.
+
 ## Local Setup
 
 From the `project/` directory:
@@ -46,6 +50,12 @@ From the `project/` directory:
 ```bash
 npm install
 npm start
+```
+
+The local backend runs on:
+
+```text
+http://localhost:3000
 ```
 
 ## Docker Setup
@@ -95,10 +105,6 @@ No real user or operational data is used.
 
 ## API
 
-The backend runs on:
-
-`http://localhost:3000`
-
 Available API groups:
 
 * `/api/users`
@@ -106,17 +112,62 @@ Available API groups:
 * `/api/reservations`
 * `/api/trips`
 
-## CI
+### Local Base URL
 
-GitHub Actions automatically:
+```text
+http://localhost:3000
+```
 
-1. Installs dependencies
-2. Checks JavaScript syntax
-3. Builds the Docker image
+### Deployed Base URL
+
+```text
+https://university-fleet-backend.vercel.app/
+```
+
+The deployed URL is used by the frontend/backend integration team for API integration.
+
+## CI/CD
+
+GitHub Actions automatically runs on pushes to the configured branches and pull requests targeting `main`.
+
+The CI pipeline:
+
+1. Checks out the repository
+2. Sets up Node.js 20
+3. Installs dependencies with `npm ci`
+4. Checks JavaScript syntax
+5. Builds the Docker image
 
 Workflow:
 
-`.github/workflows/ci.yml`
+```text
+.github/workflows/ci.yml
+```
+
+### Deployment
+
+The backend is deployed on Vercel.
+
+New changes pushed to the connected GitHub repository can trigger a new Vercel deployment automatically.
+
+Deployment project:
+
+```text
+university-fleet-backend
+```
+
+## Monitoring and Logs
+
+Deployment and runtime logs can be reviewed through the Vercel project dashboard.
+
+Logs should be used to monitor:
+
+* Deployment failures
+* Application runtime errors
+* API/server errors
+* Database connection issues
+
+Sensitive information such as passwords, API keys, authentication tokens, and other secrets must not be written to logs.
 
 ## Security Notes
 
@@ -125,13 +176,26 @@ Workflow:
 * Use environment variables or secret storage for sensitive configuration.
 * Do not log passwords or authentication tokens.
 * Demo data is synthetic and intended only for development/testing.
+* Production database credentials must not use local development credentials.
 
 ## Current Status
 
-* CI pipeline configured
+* Git repository and feature branch configured
+* GitHub Actions CI pipeline configured
 * Docker environment configured
-* PostgreSQL configured
+* Docker image build verified
+* PostgreSQL local container configured
+* PostgreSQL health check configured
 * Database schema configured
 * Demo seed data configured
 * Environment variables documented
 * Local staging environment verified
+* Backend deployed to Vercel
+* Vercel deployment verified
+* Automatic deployment workflow configured
+* Monitoring and deployment logs available through Vercel
+
+### Pending Integration
+
+* Hosted PostgreSQL connection for the deployed environment
+* Final API verification after production database configuration
