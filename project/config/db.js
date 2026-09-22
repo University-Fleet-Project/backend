@@ -78,9 +78,7 @@ async function bootstrapDatabase() {
 
       CREATE TABLE IF NOT EXISTS driver_qualifications (
         qualification_id SERIAL PRIMARY KEY,
-        driver_id INTEGER NOT NULL
-          REFERENCES drivers(driver_id)
-          ON DELETE CASCADE,
+        driver_id INTEGER NOT NULL REFERENCES drivers(driver_id) ON DELETE CASCADE,
         qualification TEXT NOT NULL,
         valid_from DATE,
         valid_to DATE,
