@@ -1,14 +1,12 @@
 const { Pool } = require('pg');
 const path = require('path');
-const fs = require('fs');
 require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
 
 const pool = new Pool({
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || process.env.DB_DATABASE || 'fleet_db',
-  password: String(process.env.DB_PASSWORD ?? '1234'),
-  port: Number(process.env.DB_PORT || 5432),
+  connectionString: process.env.DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false,
+  },
   max: 10,
 });
 
@@ -208,10 +206,13 @@ async function bootstrapDatabase() {
       ON trips(reservation_id);
     `);
 
-    console.log('PostgreSQL connected; non-destructive Fleet API support schema ready.');
+    console.log(
+      'PostgreSQL connected; non-destructive Fleet API support schema ready.'
+    );
   } finally {
     client.release();
   }
 }
 
 module.exports = { pool, bootstrapDatabase };
+
