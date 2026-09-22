@@ -380,6 +380,61 @@ const schemas = {
     }
   },
 
+  RouteEstimateDetail: {
+    type: 'object',
+    nullable: true,
+    properties: {
+      distance_km: { type: 'number', example: 71.73 },
+      duration_minutes: { type: 'integer', example: 108 },
+      provider: { type: 'string', example: 'mock' }
+    }
+  },
+
+  FuelEstimateDetail: {
+    type: 'object',
+    nullable: true,
+    properties: {
+      estimated_liters: { type: 'number', example: 11.55 },
+      estimated_cost: { type: 'number', example: 173.23 },
+      min_liters: { type: 'number', example: 10.16 },
+      max_liters: { type: 'number', example: 13.63 },
+      method: { type: 'string', example: 'baseline' },
+      confidence: { type: 'number', example: 0.72 },
+      assumptions: {
+        type: 'array',
+        items: { type: 'string' },
+        example: ['Nominal consumption: 16.1 L/100km', 'medium traffic', 'AC disabled']
+      },
+      fallback_used: { type: 'boolean', example: true }
+    }
+  },
+
+  ReservationDetailResponse: {
+    type: 'object',
+    properties: {
+      reservation_id: { type: 'string', example: 'FLT-RES-1790119540710' },
+      vehicle_id: { type: 'string', example: 'FLT-V-002' },
+      vehicle_type: { type: 'string', example: 'Bus' },
+      request_timestamp: { type: 'string', format: 'date-time' },
+      approval_timestamp: { type: 'string', format: 'date-time', nullable: true },
+      trip_start_timestamp: { type: 'string', format: 'date-time' },
+      trip_end_timestamp: { type: 'string', format: 'date-time' },
+      status: { type: 'string', example: 'pending' },
+      origin: { type: 'string', example: 'مبنى الإدارة المركزية' },
+      destination: { type: 'string', example: 'ديروط' },
+      route_km: { type: 'string', example: '71.73' },
+      estimated_fuel_liters: { type: 'string', example: '11.54853' },
+      actual_fuel_liters: { type: 'number', nullable: true },
+      fuel_price: { type: 'string', example: '15.00' },
+      passengers: { type: 'integer', example: 20 },
+      load_kg: { type: 'string', example: '200' },
+      requester_id: { type: 'integer', example: 23 },
+      comment: { type: 'string', nullable: true },
+      route_estimate: { $ref: '#/components/schemas/RouteEstimateDetail' },
+      fuel_estimate: { $ref: '#/components/schemas/FuelEstimateDetail' }
+    }
+  },
+
   DriverCreateRequest: {
     type: 'object',
     required: ['userId', 'licenseNumber'],

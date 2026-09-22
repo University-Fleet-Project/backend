@@ -230,6 +230,40 @@ async function bootstrapDatabase() {
       ALTER TABLE reservations ADD COLUMN IF NOT EXISTS comment TEXT;
       ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
       ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS image_url TEXT;
+
+      INSERT INTO route_estimates (reservation_id, origin, destination, distance_km, duration_minutes, provider, snapshot)
+      SELECT
+        r.reservation_id,
+        to_jsonb(r.origin),
+        to_jsonb(r.destination),
+        COALESCE(r.route_km::numeric, 0),
+        ROUND(COALESCE(r.route_km::numeric, 0) / 40 * 60),
+        'mock',
+        '{"method": "haversine*1.2"}'::jsonb
+      FROM reservations r
+      WHERE r.route_km IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM route_estimates re WHERE re.reservation_id = r.reservation_id
+        );
+
+      INSERT INTO fuel_estimates (reservation_id, vehicle_id, route_distance_km, estimated_liters, estimated_cost, method, min_liters, max_liters, confidence, assumptions, fallback_used)
+      SELECT
+        r.reservation_id,
+        r.vehicle_id,
+        COALESCE(r.route_km::numeric, 0),
+        COALESCE(r.estimated_fuel_liters::numeric, 0),
+        COALESCE(r.estimated_fuel_liters::numeric, 0) * COALESCE(r.fuel_price::numeric, 15),
+        'baseline',
+        COALESCE(r.estimated_fuel_liters::numeric, 0) * 0.88,
+        COALESCE(r.estimated_fuel_liters::numeric, 0) * 1.18,
+        0.72,
+        '["Derived from reservation and vehicle consumption"]'::jsonb,
+        true
+      FROM reservations r
+      WHERE r.estimated_fuel_liters IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM fuel_estimates fe WHERE fe.reservation_id = r.reservation_id
+        );
     `);
 
     console.log(

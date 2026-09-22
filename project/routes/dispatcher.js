@@ -2,7 +2,47 @@ const express=require('express'); const {pool}=require('../config/db'); const {o
 const router=express.Router();
 
 router.get('/reservations',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const {status='pending',date,vehicleType,search}=req.query;const {page,limit,offset}=pagination(req);const vals=[];const w=[];const add=(s,v)=>{vals.push(v);w.push(s.replace('?',`$${vals.length}`));};if(status)add(`r.status=?`,status);if(vehicleType)add(`r.vehicle_type ILIKE ?`,vehicleType);if(date)add(`DATE(r.trip_start_timestamp)=?`,date);if(search){vals.push(`%${search}%`);w.push(`(r.reservation_id ILIKE $${vals.length} OR r.origin ILIKE $${vals.length} OR r.destination ILIKE $${vals.length})`);}try{const where=w.length?`WHERE ${w.join(' AND ')}`:'';const c=await pool.query(`SELECT COUNT(*)::int total FROM reservations r ${where}`,vals);const r=await pool.query(`SELECT r.* FROM reservations r ${where} ORDER BY r.request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);return paged(res,r.rows,c.rows[0].total,page,limit);}catch(e){return fail(res,500,'DISPATCHER_ERROR','Unable to list dispatcher reservations.');}});
-router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');return ok(res,r.rows[0]);});
+async function fetchReservationEstimates(clientOrPool, reservationId) {
+  let route_estimate = null;
+  let fuel_estimate = null;
+  try {
+    const routeRes = await clientOrPool.query(
+      `SELECT * FROM route_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
+      [reservationId]
+    );
+    if (routeRes.rows[0]) {
+      const re = routeRes.rows[0];
+      route_estimate = {
+        distance_km: re.distance_km != null ? Number(Number(re.distance_km).toFixed(2)) : null,
+        duration_minutes: re.duration_minutes != null ? Number(re.duration_minutes) : null,
+        provider: re.provider || 'mock'
+      };
+    }
+
+    const fuelRes = await clientOrPool.query(
+      `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
+      [reservationId]
+    );
+    if (fuelRes.rows[0]) {
+      const fe = fuelRes.rows[0];
+      fuel_estimate = {
+        estimated_liters: fe.estimated_liters != null ? Number(Number(fe.estimated_liters).toFixed(2)) : null,
+        estimated_cost: fe.estimated_cost != null ? Number(Number(fe.estimated_cost).toFixed(2)) : null,
+        min_liters: fe.min_liters != null ? Number(Number(fe.min_liters).toFixed(2)) : null,
+        max_liters: fe.max_liters != null ? Number(Number(fe.max_liters).toFixed(2)) : null,
+        method: fe.method || 'baseline',
+        confidence: fe.confidence != null ? Number(fe.confidence) : 0.72,
+        assumptions: fe.assumptions || null,
+        fallback_used: fe.fallback_used ?? true
+      };
+    }
+  } catch (e) {
+    console.error('Error fetching reservation estimates:', e);
+  }
+  return { route_estimate, fuel_estimate };
+}
+
+router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const estimates=await fetchReservationEstimates(pool,req.params.id);return ok(res,{...r.rows[0],...estimates});});
 
 router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fleet_admin'),async(req,res)=>{
  const {vehicleId,driverId,reason}=req.body; if(!vehicleId||!driverId)return fail(res,400,'VALIDATION_ERROR','vehicleId and driverId are required.');
