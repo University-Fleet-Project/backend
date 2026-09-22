@@ -20,11 +20,23 @@ router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fle
    if(overlap.rows[0]){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_CONFLICT','Vehicle already allocated for an overlapping trip.',{conflictReservationId:overlap.rows[0].reservation_id});}
    const old=reservation.status;
    await client.query(`UPDATE reservations SET vehicle_id=$1,driver_id=$2,status='approved',approval_timestamp=NOW() WHERE reservation_id=$3`,[vehicleId,driverId,req.params.id]);
+   let dr=await client.query(`SELECT driver_id FROM drivers WHERE CAST(driver_id AS TEXT)=$1 OR CAST(user_id AS TEXT)=$1 LIMIT 1`,[String(driverId)]);
+   let effectiveDriverId=dr.rows[0]?.driver_id||(Number.isNaN(Number(driverId))?null:Number(driverId));
+   let tripRes=await client.query(`SELECT trip_id FROM trips WHERE reservation_id=$1`,[req.params.id]);
+   let tripId;
+   if(tripRes.rows[0]){
+     tripId=tripRes.rows[0].trip_id;
+     await client.query(`UPDATE trips SET driver_id=$1 WHERE trip_id=$2`,[effectiveDriverId,tripId]);
+   }else{
+     let odo=Number(v.rows[0]?.current_odometer||0);
+     let nt=await client.query(`INSERT INTO trips(reservation_id,driver_id,start_odometer,created_at) VALUES($1,$2,$3,NOW()) RETURNING trip_id`,[req.params.id,effectiveDriverId,odo]);
+     tripId=nt.rows[0].trip_id;
+   }
    await client.query('COMMIT');
    await addReservationHistory(req.params.id,old,'approved',userId(req),reason||'Approved after availability check');
    await audit(userId(req),'APPROVE_RESERVATION','reservation',req.params.id,{vehicleId,driverId});
    await notify(reservation.requester_id,'Reservation approved','Your reservation has been approved.');
-   return ok(res,{reservationId:req.params.id,vehicleId,driverId,status:'approved'},'Reservation approved');
+   return ok(res,{reservationId:req.params.id,tripId:Number(tripId),vehicleId,driverId,status:'approved'},'Reservation approved');
  }catch(e){try{await client.query('ROLLBACK')}catch{};console.error(e);return fail(res,500,'APPROVAL_ERROR','Server error during approval.');}finally{client.release();}
 });
 router.post('/reservations/:id/reject',requireAuth,allowRoles('dispatcher','fleet_admin'),async(req,res)=>{const reason=req.body.reason||'Rejected';try{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const old=r.rows[0].status;await pool.query(`UPDATE reservations SET status='rejected',rejection_reason=$1 WHERE reservation_id=$2`,[reason,req.params.id]);await addReservationHistory(req.params.id,old,'rejected',userId(req),reason);await audit(userId(req),'REJECT_RESERVATION','reservation',req.params.id,{reason});await notify(r.rows[0].requester_id,'Reservation rejected',reason);return ok(res,null,'Reservation rejected');}catch(e){return fail(res,500,'REJECTION_ERROR','Unable to reject reservation.');}});

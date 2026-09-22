@@ -226,6 +226,10 @@ async function bootstrapDatabase() {
 
       CREATE INDEX IF NOT EXISTS idx_trips_reservation
       ON trips(reservation_id);
+
+      ALTER TABLE reservations ADD COLUMN IF NOT EXISTS comment TEXT;
+      ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
+      ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS image_url TEXT;
     `);
 
     console.log(

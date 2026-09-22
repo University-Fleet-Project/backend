@@ -106,6 +106,7 @@ app.use('/api/v1/dashboard', dashboard);
 app.use('/api/v1/analytics', analytics);
 app.use('/api/v1/audit-logs', audit);
 app.use('/api/v1/vehicles', maintenance);
+app.use('/api/v1/maintenance', maintenance);
 app.use('/api/v1/notifications', notifications);
 app.use('/api/v1', meta);
 app.use('/api/v1/reports', reports);

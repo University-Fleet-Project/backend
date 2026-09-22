@@ -294,6 +294,15 @@ const schemas = {
     }
   },
 
+  VehiclePhotoCreateRequest: {
+    type: 'object',
+    required: ['imageUrl'],
+    properties: {
+      imageUrl: { type: 'string', example: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341' },
+      caption: { type: 'string', example: 'Front bumper view' }
+    }
+  },
+
   ReservationCreateRequest: {
     type: 'object',
     required: [
@@ -339,7 +348,9 @@ const schemas = {
       },
       passengers: { type: 'integer', example: 3 },
       load: { type: 'number', example: 50 },
-      distanceKm: { type: 'number', example: 35 }
+      distanceKm: { type: 'number', example: 35 },
+      comment: { type: 'string', example: 'Official trip for university delegation' },
+      notes: { type: 'string', example: 'Official trip for university delegation' }
     }
   },
 
@@ -761,6 +772,27 @@ add('/api/v1/vehicles/{id}/odometer', 'post', 'Record odometer', {
     value: 12550,
     recordedAt: '2026-09-21T18:00:00'
   })
+});
+
+add('/api/v1/vehicles/{vehicleId}/photos', 'get', 'List vehicle photos', {
+  params: [pathParam('vehicleId', 'Vehicle ID')]
+});
+
+add('/api/v1/vehicles/{vehicleId}/photos', 'post', 'Add vehicle photo', {
+  roles: ['fleet_admin', 'dispatcher'],
+  params: [pathParam('vehicleId', 'Vehicle ID')],
+  body: bodyRef('VehiclePhotoCreateRequest', {
+    imageUrl: 'https://images.unsplash.com/photo-1549399542-7e3f8b79c341',
+    caption: 'Front view'
+  })
+});
+
+add('/api/v1/vehicles/{vehicleId}/photos/{photoId}', 'delete', 'Delete vehicle photo', {
+  roles: ['fleet_admin', 'dispatcher'],
+  params: [
+    pathParam('vehicleId', 'Vehicle ID'),
+    pathParam('photoId', 'Photo ID')
+  ]
 });
 
 /* ----------------------------- Brands / Models / Specs ----------------------------- */
@@ -1205,6 +1237,10 @@ add('/api/v1/maintenance/{maintenanceId}', 'put', 'Update maintenance', {
 add('/api/v1/maintenance/{maintenanceId}/complete', 'post', 'Complete maintenance', {
   roles: ['fleet_admin', 'dispatcher'],
   params: [pathParam('maintenanceId', 'Maintenance ID')]
+});
+
+add('/api/v1/maintenance/{id}', 'get', 'Get maintenance record', {
+  params: [pathParam('id', 'Maintenance ID')]
 });
 
 /* ----------------------------- Reports ----------------------------- */

@@ -2,12 +2,15 @@ const express=require('express'); const {pool}=require('../config/db'); const {o
 const router=express.Router();
 
 function bodyValue(b,a,c){return b[a]!==undefined?b[a]:b[c];}
-router.post('/',requireAuth,async(req,res)=>{
+ router.post('/',requireAuth,async(req,res)=>{
  const b=req.body; const requesterId=userId(req)||bodyValue(b,'requesterId','requester_id'); const vehicleId=bodyValue(b,'vehicleId','vehicle_id');
  const start=bodyValue(b,'startTime','start_time'), end=bodyValue(b,'endTime','end_time');
  const origin=typeof b.origin==='object'?JSON.stringify(b.origin):b.origin, destination=typeof b.destination==='object'?JSON.stringify(b.destination):b.destination;
  if(!requesterId||!vehicleId||!start||!end||!origin||!destination||b.passengers==null||b.distanceKm==null&&b.distance_km==null)return fail(res,400,'VALIDATION_ERROR','vehicleId, startTime, endTime, origin, destination, passengers and distanceKm are required.');
+ const sDate=new Date(start), eDate=new Date(end);
+ if(Number.isNaN(sDate.getTime())||Number.isNaN(eDate.getTime())||eDate<=sDate)return fail(res,400,'INVALID_TIMEFRAME','startTime and endTime must be valid ISO dates with startTime before endTime.');
  const distance=bodyValue(b,'distanceKm','distance_km');
+ const comment=b.comment??b.notes??null;
  try{
    const v=await pool.query(`SELECT * FROM vehicles WHERE vehicle_id=$1`,[vehicleId]); if(!v.rows[0])return fail(res,404,'VEHICLE_NOT_FOUND','Vehicle not found.');
    if(v.rows[0].service_status!=='available')return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not currently available.');
@@ -17,7 +20,7 @@ router.post('/',requireAuth,async(req,res)=>{
    if(conflict.rows[0])return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is already allocated for the selected time.');
    const nominal=Number(v.rows[0].nominal_l_per_100km||0), est=Number(distance)*nominal/100;
    const id='FLT-RES-'+Date.now();
-   const r=await pool.query(`INSERT INTO reservations(reservation_id,vehicle_id,vehicle_type,request_timestamp,trip_start_timestamp,trip_end_timestamp,status,origin,destination,route_km,estimated_fuel_liters,passengers,load_kg,requester_id) VALUES($1,$2,$3,NOW(),$4,$5,'pending',$6,$7,$8,$9,$10,$11,$12) RETURNING *`,[id,vehicleId,v.rows[0].vehicle_type,start,end,origin,destination,distance,est,b.passengers,b.load??b.load_kg??0,requesterId]);
+   const r=await pool.query(`INSERT INTO reservations(reservation_id,vehicle_id,vehicle_type,request_timestamp,trip_start_timestamp,trip_end_timestamp,status,origin,destination,route_km,estimated_fuel_liters,passengers,load_kg,requester_id,comment) VALUES($1,$2,$3,NOW(),$4,$5,'pending',$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,[id,vehicleId,v.rows[0].vehicle_type,start,end,origin,destination,distance,est,b.passengers,b.load??b.load_kg??0,requesterId,comment]);
    await addReservationHistory(id,null,'pending',requesterId,'Reservation created'); await audit(requesterId,'CREATE_RESERVATION','reservation',id); return ok(res,r.rows[0],'Reservation created',201);
  }catch(e){console.error(e);return fail(res,400,'CREATE_RESERVATION_ERROR',e.message);}
 });
