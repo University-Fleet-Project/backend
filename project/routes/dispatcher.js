@@ -13,9 +13,12 @@ router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fle
    const reservation=rr.rows[0]; if(!['pending','rejected'].includes(reservation.status)){await client.query('ROLLBACK');return fail(res,409,'INVALID_STATUS','Only pending reservations can be approved.');}
    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`,[String(vehicleId)]);
    const v=await client.query(`SELECT * FROM vehicles WHERE vehicle_id=$1 FOR UPDATE`,[vehicleId]);if(!v.rows[0]){await client.query('ROLLBACK');return fail(res,404,'VEHICLE_NOT_FOUND','Vehicle not found.');}
-   if(v.rows[0].service_status!=='available'){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not available.');}
+   const currentStatus=String(v.rows[0].service_status||'').trim().toLowerCase();
+   if(!['available','active'].includes(currentStatus)){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not available.');}
    if(Number(reservation.passengers||0)>Number(v.rows[0].seats||Infinity)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
    if(reservation.load_kg!=null&&v.rows[0].allowed_load_kg!=null&&Number(reservation.load_kg)>Number(v.rows[0].allowed_load_kg)){await client.query('ROLLBACK');return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');}
+   const maintOverlap=await client.query(`SELECT maintenance_id FROM maintenance_records WHERE vehicle_id=$1 AND status<>'completed' AND start_at<$3 AND end_at>$2 LIMIT 1`,[vehicleId,reservation.trip_start_timestamp,reservation.trip_end_timestamp]);
+   if(maintOverlap.rows[0]){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is under maintenance during the reservation window.');}
    const overlap=await client.query(`SELECT reservation_id FROM reservations WHERE vehicle_id=$1 AND status IN('approved','active') AND trip_start_timestamp<$3 AND trip_end_timestamp>$2 LIMIT 1`,[vehicleId,reservation.trip_start_timestamp,reservation.trip_end_timestamp]);
    if(overlap.rows[0]){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_CONFLICT','Vehicle already allocated for an overlapping trip.',{conflictReservationId:overlap.rows[0].reservation_id});}
    const old=reservation.status;

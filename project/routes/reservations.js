@@ -13,10 +13,13 @@ function bodyValue(b,a,c){return b[a]!==undefined?b[a]:b[c];}
  const comment=b.comment??b.notes??null;
  try{
    const v=await pool.query(`SELECT * FROM vehicles WHERE vehicle_id=$1`,[vehicleId]); if(!v.rows[0])return fail(res,404,'VEHICLE_NOT_FOUND','Vehicle not found.');
-   if(v.rows[0].service_status!=='available')return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not currently available.');
-   if(Number(b.passengers)>Number(v.rows[0].seats))return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');
-   if(b.load!=null && v.rows[0].allowed_load_kg!=null && Number(b.load)>Number(v.rows[0].allowed_load_kg))return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');
-   const conflict=await pool.query(`SELECT reservation_id FROM reservations WHERE vehicle_id=$1 AND status IN('approved','active') AND trip_start_timestamp<$3 AND trip_end_timestamp>$2 LIMIT 1`,[vehicleId,start,end]);
+    const currentStatus = String(v.rows[0].service_status || '').trim().toLowerCase();
+    if(!['available','active'].includes(currentStatus))return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not currently available.');
+    if(Number(b.passengers)>Number(v.rows[0].seats))return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');
+    if(b.load!=null && v.rows[0].allowed_load_kg!=null && Number(b.load)>Number(v.rows[0].allowed_load_kg))return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');
+    const maintConflict=await pool.query(`SELECT maintenance_id FROM maintenance_records WHERE vehicle_id=$1 AND status<>'completed' AND start_at<$3 AND end_at>$2 LIMIT 1`,[vehicleId,start,end]);
+    if(maintConflict.rows[0])return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is under maintenance for the selected time.');
+    const conflict=await pool.query(`SELECT reservation_id FROM reservations WHERE vehicle_id=$1 AND status IN('approved','active') AND trip_start_timestamp<$3 AND trip_end_timestamp>$2 LIMIT 1`,[vehicleId,start,end]);
    if(conflict.rows[0])return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is already allocated for the selected time.');
    const nominal=Number(v.rows[0].nominal_l_per_100km||0), est=Number(distance)*nominal/100;
    const id='FLT-RES-'+Date.now();
