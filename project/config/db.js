@@ -1,21 +1,29 @@
+
 const { Pool } = require('pg');
 const path = require('path');
-require('dotenv').config({ path: path.resolve(process.cwd(), '.env') });
+
+require('dotenv').config({
+  path: path.resolve(process.cwd(), '.env')
+});
 
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || process.env.DB_DATABASE || 'fleet_db',
+  password: String(process.env.DB_PASSWORD ?? '1234'),
+  port: Number(process.env.DB_PORT || 5432),
   ssl: {
-    rejectUnauthorized: false,
+    rejectUnauthorized: false
   },
-  max: 10,
+  max: 10
 });
 
 async function bootstrapDatabase() {
   const client = await pool.connect();
+
   try {
     await client.query('SELECT 1');
 
-    // Non-destructive: never drops or replaces the team's existing core tables.
     await client.query(`
       CREATE TABLE IF NOT EXISTS fleet_api_credentials (
         user_id TEXT PRIMARY KEY,
@@ -189,10 +197,7 @@ async function bootstrapDatabase() {
         improvement NUMERIC,
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
-    `);
 
-    // Safe indexes on the existing tables.
-    await client.query(`
       CREATE INDEX IF NOT EXISTS idx_reservations_vehicle_window
       ON reservations(vehicle_id, trip_start_timestamp, trip_end_timestamp);
 
@@ -206,13 +211,10 @@ async function bootstrapDatabase() {
       ON trips(reservation_id);
     `);
 
-    console.log(
-      'PostgreSQL connected; non-destructive Fleet API support schema ready.'
-    );
+    console.log('PostgreSQL connected; Fleet API support schema ready.');
   } finally {
     client.release();
   }
 }
 
 module.exports = { pool, bootstrapDatabase };
-
