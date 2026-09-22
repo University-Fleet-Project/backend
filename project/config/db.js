@@ -5,17 +5,29 @@ require('dotenv').config({
   path: path.resolve(process.cwd(), '.env'),
 });
 
+// ======================================================
+// PostgreSQL / Neon connection
+// ======================================================
+
 const pool = new Pool({
   user: process.env.DB_USER || 'postgres',
   host: process.env.DB_HOST || 'localhost',
   database: process.env.DB_NAME || process.env.DB_DATABASE || 'fleet_db',
   password: String(process.env.DB_PASSWORD ?? '1234'),
   port: Number(process.env.DB_PORT || 5432),
+
+  // Required for Neon PostgreSQL / Vercel
   ssl: {
     rejectUnauthorized: false,
   },
+
+  // Good for Vercel/serverless usage
   max: 10,
 });
+
+// ======================================================
+// Database bootstrap
+// ======================================================
 
 async function bootstrapDatabase() {
   const client = await pool.connect();
@@ -66,7 +78,9 @@ async function bootstrapDatabase() {
 
       CREATE TABLE IF NOT EXISTS driver_qualifications (
         qualification_id SERIAL PRIMARY KEY,
-        driver_id INTEGER NOT NULL REFERENCES drivers(driver_id) ON DELETE CASCADE,
+        driver_id INTEGER NOT NULL
+          REFERENCES drivers(driver_id)
+          ON DELETE CASCADE,
         qualification TEXT NOT NULL,
         valid_from DATE,
         valid_to DATE,
@@ -200,7 +214,11 @@ async function bootstrapDatabase() {
 
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_reservations_vehicle_window
-      ON reservations(vehicle_id, trip_start_timestamp, trip_end_timestamp);
+      ON reservations(
+        vehicle_id,
+        trip_start_timestamp,
+        trip_end_timestamp
+      );
 
       CREATE INDEX IF NOT EXISTS idx_reservations_requester
       ON reservations(requester_id);
@@ -219,6 +237,10 @@ async function bootstrapDatabase() {
     client.release();
   }
 }
+
+// ======================================================
+// Exports
+// ======================================================
 
 module.exports = {
   pool,
