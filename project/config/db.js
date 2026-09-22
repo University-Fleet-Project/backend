@@ -5,29 +5,17 @@ require('dotenv').config({
   path: path.resolve(process.cwd(), '.env'),
 });
 
-const poolConfig = process.env.DATABASE_URL
-  ? {
-      connectionString: process.env.DATABASE_URL,
-      ssl: {
-        rejectUnauthorized: false,
-      },
-      max: 10,
-    }
-  : {
-      user: process.env.DB_USER || 'postgres',
-      host: process.env.DB_HOST || 'localhost',
-      database: process.env.DB_NAME || process.env.DB_DATABASE || 'fleet_db',
-      password: String(process.env.DB_PASSWORD ?? '1234'),
-      port: Number(process.env.DB_PORT || 5432),
-      ssl: process.env.VERCEL
-        ? {
-            rejectUnauthorized: false,
-          }
-        : false,
-      max: 10,
-    };
-
-const pool = new Pool(poolConfig);
+const pool = new Pool({
+  user: process.env.DB_USER || 'postgres',
+  host: process.env.DB_HOST || 'localhost',
+  database: process.env.DB_NAME || process.env.DB_DATABASE || 'fleet_db',
+  password: String(process.env.DB_PASSWORD ?? '1234'),
+  port: Number(process.env.DB_PORT || 5432),
+  ssl: {
+    rejectUnauthorized: false,
+  },
+  max: 10,
+});
 
 async function bootstrapDatabase() {
   const client = await pool.connect();
