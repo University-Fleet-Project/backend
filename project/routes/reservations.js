@@ -17,11 +17,14 @@ async function ensureReservationEstimates(clientOrPool, r) {
         try { destObj = JSON.parse(destObj); } catch { destObj = { name: r.destination }; }
       }
 
+      const dist = Number(r.route_km);
+      const durationMins = (dist > 0) ? Math.round(dist / 40 * 60) : null;
+
       await clientOrPool.query(
         `INSERT INTO route_estimates (reservation_id, origin, destination, distance_km, duration_minutes, provider, snapshot)
-         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, NULL, 'mock', '{"method": "haversine*1.2"}'::jsonb
+         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, $5::numeric, 'mock', '{"method": "haversine*1.2"}'::jsonb
          WHERE NOT EXISTS (SELECT 1 FROM route_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
-        [resId, JSON.stringify(originObj), JSON.stringify(destObj), Number(r.route_km)]
+        [resId, JSON.stringify(originObj), JSON.stringify(destObj), dist, durationMins]
       );
     }
 
@@ -76,9 +79,21 @@ async function fetchReservationEstimates(clientOrPool, reservationId, reservatio
 
     if (routeRes.rows[0]) {
       const re = routeRes.rows[0];
+      let durationMins = re.duration_minutes != null ? Number(re.duration_minutes) : null;
+      if (durationMins == null && re.distance_km != null && Number(re.distance_km) > 0) {
+        durationMins = Math.round(Number(re.distance_km) / 40 * 60);
+        try {
+          await clientOrPool.query(
+            `UPDATE route_estimates SET duration_minutes = $1 WHERE route_id = $2 AND duration_minutes IS NULL`,
+            [durationMins, re.route_id]
+          );
+        } catch (uErr) {
+          console.error('Error updating duration_minutes on route_estimates:', uErr);
+        }
+      }
       route_estimate = {
         distance_km: re.distance_km != null ? Number(Number(re.distance_km).toFixed(2)) : null,
-        duration_minutes: re.duration_minutes != null ? Number(re.duration_minutes) : null,
+        duration_minutes: durationMins,
         provider: re.provider || 'mock'
       };
     }
@@ -125,7 +140,32 @@ async function fetchReservationEstimates(clientOrPool, reservationId, reservatio
    const id='FLT-RES-'+Date.now();
    const r=await pool.query(`INSERT INTO reservations(reservation_id,vehicle_id,vehicle_type,request_timestamp,trip_start_timestamp,trip_end_timestamp,status,origin,destination,route_km,estimated_fuel_liters,passengers,load_kg,requester_id,comment) VALUES($1,$2,$3,NOW(),$4,$5,'pending',$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,[id,vehicleId,v.rows[0].vehicle_type,start,end,origin,destination,distance,est,b.passengers,b.load??b.load_kg??0,requesterId,comment]);
 
-   const durationMinutes = bodyValue(b, 'durationMinutes', 'duration_minutes') ?? b.duration ?? null;
+   let durationMinutes = bodyValue(b, 'durationMinutes', 'duration_minutes') ?? b.duration ?? null;
+   if (durationMinutes == null && (b.routeEstimateId || b.route_estimate_id)) {
+     const estId = b.routeEstimateId || b.route_estimate_id;
+     try {
+       const reQuery = await pool.query(`SELECT duration_minutes FROM route_estimates WHERE route_id = $1`, [estId]);
+       if (reQuery.rows[0] && reQuery.rows[0].duration_minutes != null) {
+         durationMinutes = Number(reQuery.rows[0].duration_minutes);
+       }
+     } catch (e) {}
+   }
+   if (durationMinutes == null && distance != null && !isNaN(Number(distance)) && Number(distance) > 0) {
+     try {
+       const reQuery = await pool.query(
+         `SELECT duration_minutes FROM route_estimates WHERE reservation_id IS NULL AND distance_km = $1 AND duration_minutes IS NOT NULL ORDER BY created_at DESC LIMIT 1`,
+         [Number(distance)]
+       );
+       if (reQuery.rows[0] && reQuery.rows[0].duration_minutes != null) {
+         durationMinutes = Number(reQuery.rows[0].duration_minutes);
+       } else {
+         durationMinutes = Math.round(Number(distance) / 40 * 60);
+       }
+     } catch (e) {
+       durationMinutes = Math.round(Number(distance) / 40 * 60);
+     }
+   }
+
    const fuelPrice = Number(process.env.FUEL_PRICE_EGP || 15);
    const estCost = b.estimatedCost ?? b.estimated_cost ?? (est * fuelPrice);
    const minLit = b.minLiters ?? b.min_liters ?? (est * 0.88);

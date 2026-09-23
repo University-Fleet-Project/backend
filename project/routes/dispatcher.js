@@ -17,11 +17,14 @@ async function ensureReservationEstimates(clientOrPool, r) {
         try { destObj = JSON.parse(destObj); } catch { destObj = { name: r.destination }; }
       }
 
+      const dist = Number(r.route_km);
+      const durationMins = (dist > 0) ? Math.round(dist / 40 * 60) : null;
+
       await clientOrPool.query(
         `INSERT INTO route_estimates (reservation_id, origin, destination, distance_km, duration_minutes, provider, snapshot)
-         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, NULL, 'mock', '{"method": "haversine*1.2"}'::jsonb
+         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, $5::numeric, 'mock', '{"method": "haversine*1.2"}'::jsonb
          WHERE NOT EXISTS (SELECT 1 FROM route_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
-        [resId, JSON.stringify(originObj), JSON.stringify(destObj), Number(r.route_km)]
+        [resId, JSON.stringify(originObj), JSON.stringify(destObj), dist, durationMins]
       );
     }
 
@@ -76,9 +79,21 @@ async function fetchReservationEstimates(clientOrPool, reservationId, reservatio
 
     if (routeRes.rows[0]) {
       const re = routeRes.rows[0];
+      let durationMins = re.duration_minutes != null ? Number(re.duration_minutes) : null;
+      if (durationMins == null && re.distance_km != null && Number(re.distance_km) > 0) {
+        durationMins = Math.round(Number(re.distance_km) / 40 * 60);
+        try {
+          await clientOrPool.query(
+            `UPDATE route_estimates SET duration_minutes = $1 WHERE route_id = $2 AND duration_minutes IS NULL`,
+            [durationMins, re.route_id]
+          );
+        } catch (uErr) {
+          console.error('Error updating duration_minutes on route_estimates:', uErr);
+        }
+      }
       route_estimate = {
         distance_km: re.distance_km != null ? Number(Number(re.distance_km).toFixed(2)) : null,
-        duration_minutes: re.duration_minutes != null ? Number(re.duration_minutes) : null,
+        duration_minutes: durationMins,
         provider: re.provider || 'mock'
       };
     }
