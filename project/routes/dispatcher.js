@@ -2,14 +2,78 @@ const express=require('express'); const {pool}=require('../config/db'); const {o
 const router=express.Router();
 
 router.get('/reservations',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const {status='pending',date,vehicleType,search}=req.query;const {page,limit,offset}=pagination(req);const vals=[];const w=[];const add=(s,v)=>{vals.push(v);w.push(s.replace('?',`$${vals.length}`));};if(status)add(`r.status=?`,status);if(vehicleType)add(`r.vehicle_type ILIKE ?`,vehicleType);if(date)add(`DATE(r.trip_start_timestamp)=?`,date);if(search){vals.push(`%${search}%`);w.push(`(r.reservation_id ILIKE $${vals.length} OR r.origin ILIKE $${vals.length} OR r.destination ILIKE $${vals.length})`);}try{const where=w.length?`WHERE ${w.join(' AND ')}`:'';const c=await pool.query(`SELECT COUNT(*)::int total FROM reservations r ${where}`,vals);const r=await pool.query(`SELECT r.* FROM reservations r ${where} ORDER BY r.request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);return paged(res,r.rows,c.rows[0].total,page,limit);}catch(e){return fail(res,500,'DISPATCHER_ERROR','Unable to list dispatcher reservations.');}});
-async function fetchReservationEstimates(clientOrPool, reservationId) {
+async function ensureReservationEstimates(clientOrPool, r) {
+  if (!r || !r.reservation_id) return;
+  const resId = String(r.reservation_id);
+
+  try {
+    if (r.route_km != null) {
+      let originObj = r.origin;
+      if (typeof originObj === 'string') {
+        try { originObj = JSON.parse(originObj); } catch { originObj = { name: r.origin }; }
+      }
+      let destObj = r.destination;
+      if (typeof destObj === 'string') {
+        try { destObj = JSON.parse(destObj); } catch { destObj = { name: r.destination }; }
+      }
+
+      await clientOrPool.query(
+        `INSERT INTO route_estimates (reservation_id, origin, destination, distance_km, duration_minutes, provider, snapshot)
+         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, NULL, 'mock', '{"method": "haversine*1.2"}'::jsonb
+         WHERE NOT EXISTS (SELECT 1 FROM route_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
+        [resId, JSON.stringify(originObj), JSON.stringify(destObj), Number(r.route_km)]
+      );
+    }
+
+    if (r.estimated_fuel_liters != null) {
+      const estLiters = Number(r.estimated_fuel_liters);
+      const price = Number(r.fuel_price || 15);
+      const estCost = estLiters * price;
+      const minLiters = estLiters * 0.88;
+      const maxLiters = estLiters * 1.18;
+      const assumptions = ['Derived from reservation data'];
+
+      await clientOrPool.query(
+        `INSERT INTO fuel_estimates (reservation_id, vehicle_id, route_distance_km, estimated_liters, estimated_cost, method, min_liters, max_liters, confidence, assumptions, fallback_used)
+         SELECT CAST($1 AS VARCHAR), $2, $3::numeric, $4::numeric, $5::numeric, 'baseline', $6::numeric, $7::numeric, 0.72, $8::jsonb, true
+         WHERE NOT EXISTS (SELECT 1 FROM fuel_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
+        [resId, r.vehicle_id, r.route_km != null ? Number(r.route_km) : 0, estLiters, estCost, minLiters, maxLiters, JSON.stringify(assumptions)]
+      );
+    }
+  } catch (e) {
+    console.error('Error ensuring reservation estimates:', e);
+  }
+}
+
+async function fetchReservationEstimates(clientOrPool, reservationId, reservationRow = null) {
   let route_estimate = null;
   let fuel_estimate = null;
   try {
-    const routeRes = await clientOrPool.query(
+    let routeRes = await clientOrPool.query(
       `SELECT * FROM route_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
       [reservationId]
     );
+    let fuelRes = await clientOrPool.query(
+      `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
+      [reservationId]
+    );
+
+    if ((!routeRes.rows[0] || !fuelRes.rows[0]) && reservationRow) {
+      await ensureReservationEstimates(clientOrPool, reservationRow);
+      if (!routeRes.rows[0]) {
+        routeRes = await clientOrPool.query(
+          `SELECT * FROM route_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
+          [reservationId]
+        );
+      }
+      if (!fuelRes.rows[0]) {
+        fuelRes = await clientOrPool.query(
+          `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
+          [reservationId]
+        );
+      }
+    }
+
     if (routeRes.rows[0]) {
       const re = routeRes.rows[0];
       route_estimate = {
@@ -19,10 +83,6 @@ async function fetchReservationEstimates(clientOrPool, reservationId) {
       };
     }
 
-    const fuelRes = await clientOrPool.query(
-      `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
-      [reservationId]
-    );
     if (fuelRes.rows[0]) {
       const fe = fuelRes.rows[0];
       fuel_estimate = {
@@ -42,7 +102,7 @@ async function fetchReservationEstimates(clientOrPool, reservationId) {
   return { route_estimate, fuel_estimate };
 }
 
-router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const estimates=await fetchReservationEstimates(pool,req.params.id);return ok(res,{...r.rows[0],...estimates});});
+router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const estimates=await fetchReservationEstimates(pool,req.params.id,r.rows[0]);return ok(res,{...r.rows[0],...estimates});});
 
 router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fleet_admin'),async(req,res)=>{
  const {vehicleId,driverId,reason}=req.body; if(!vehicleId||!driverId)return fail(res,400,'VALIDATION_ERROR','vehicleId and driverId are required.');
