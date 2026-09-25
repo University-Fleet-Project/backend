@@ -18,6 +18,20 @@ async function isAssignedDriver(clientOrPool, userSub, assignedDriverId) {
 }
 
 /**
+ * Format location ping row to ensure numeric coordinate, speed, and accuracy fields are JSON Numbers.
+ */
+function formatLocationPing(ping) {
+  if (!ping) return ping;
+  return {
+    ...ping,
+    latitude: ping.latitude != null ? Number(ping.latitude) : null,
+    longitude: ping.longitude != null ? Number(ping.longitude) : null,
+    speed_kmh: ping.speed_kmh != null ? Number(ping.speed_kmh) : null,
+    accuracy_meters: ping.accuracy_meters != null ? Number(ping.accuracy_meters) : null
+  };
+}
+
+/**
  * Flexible trip resolver supporting integer IDs (e.g. 5), formatted trip IDs (e.g. 'FLT-TRIP-0001' or 'FLT-TRIP-5'),
  * or reservation IDs (e.g. 'FLT-RES-0001').
  */
@@ -230,7 +244,7 @@ router.post('/:id/locations', requireAuth, allowRoles('driver'), async (req, res
       `INSERT INTO location_pings(trip_id, latitude, longitude, recorded_at, accuracy_meters, speed_kmh) VALUES($1, $2, $3, $4, $5, $6) RETURNING *`,
       [x.trip_id, latitude, longitude, t, accuracyMeters || null, speedKmh || null]
     );
-    return ok(res, p.rows[0], 'Location recorded', 201);
+    return ok(res, formatLocationPing(p.rows[0]), 'Location recorded', 201);
   } catch (e) {
     console.error(e);
     return fail(res, 500, 'LOCATION_ERROR', 'Unable to record location.');
@@ -245,7 +259,7 @@ router.get('/:id/location/latest', requireAuth, async (req, res) => {
       `SELECT * FROM location_pings WHERE trip_id = $1 ORDER BY recorded_at DESC LIMIT 1`,
       [x.trip_id]
     );
-    return ok(res, r.rows[0] || null);
+    return ok(res, formatLocationPing(r.rows[0]) || null);
   } catch (e) {
     return fail(res, 500, 'LOCATION_ERROR', 'Unable to get latest location.');
   }
@@ -328,7 +342,7 @@ router.get('/:id/locations', requireAuth, async (req, res) => {
       where += ` AND recorded_at <= $${vals.length}`;
     }
     const r = await pool.query(`SELECT * FROM location_pings WHERE ${where} ORDER BY recorded_at`, vals);
-    return ok(res, r.rows);
+    return ok(res, r.rows.map(formatLocationPing));
   } catch (e) {
     return fail(res, 500, 'LOCATION_ERROR', 'Unable to get location history.');
   }

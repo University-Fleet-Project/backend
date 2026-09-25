@@ -119,9 +119,12 @@ async function fetchReservationEstimates(clientOrPool, reservationId, reservatio
 
 function formatReservation(r) {
   if (!r) return r;
+  const numericTripId = r.trip_id != null ? Number(r.trip_id) : null;
   return {
     ...r,
-    tripType: r.trip_type ?? null
+    tripType: r.trip_type ?? null,
+    tripId: numericTripId,
+    trip_id: numericTripId
   };
 }
 
@@ -243,7 +246,7 @@ router.get('/my',requireAuth,async(req,res)=>{
   if(rawTT){vals.push(String(rawTT).trim().toLowerCase());w.push(`trip_type=$${vals.length}`);}
   try{
     const c=await pool.query(`SELECT COUNT(*)::int total FROM reservations WHERE ${w.join(' AND ')}`,vals);
-    const r=await pool.query(`SELECT * FROM reservations WHERE ${w.join(' AND ')} ORDER BY request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);
+    const r=await pool.query(`SELECT r.*, (SELECT t.trip_id FROM trips t WHERE t.reservation_id = r.reservation_id ORDER BY t.trip_id DESC LIMIT 1) AS trip_id FROM reservations r WHERE ${w.join(' AND ')} ORDER BY request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);
     const items = r.rows.map(formatReservation);
     return paged(res,items,c.rows[0].total,page,limit);
   }catch(e){return fail(res,500,'RESERVATIONS_ERROR','Unable to list reservations.');}
@@ -263,14 +266,14 @@ router.get('/',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),asyn
   }
   const where = w.length ? `WHERE ${w.join(' AND ')}` : '';
   try{
-    const r=await pool.query(`SELECT * FROM reservations ${where} ORDER BY request_timestamp DESC`, vals);
+    const r=await pool.query(`SELECT r.*, (SELECT t.trip_id FROM trips t WHERE t.reservation_id = r.reservation_id ORDER BY t.trip_id DESC LIMIT 1) AS trip_id FROM reservations r ${where} ORDER BY request_timestamp DESC`, vals);
     const items = r.rows.map(formatReservation);
     return ok(res,items);
   }catch(e){return fail(res,500,'RESERVATIONS_ERROR','Unable to list reservations.');}
 });
 router.get('/:id',requireAuth,async(req,res)=>{
   try{
-    const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);
+    const r=await pool.query(`SELECT r.*, (SELECT t.trip_id FROM trips t WHERE t.reservation_id = r.reservation_id ORDER BY t.trip_id DESC LIMIT 1) AS trip_id FROM reservations r WHERE reservation_id=$1`,[req.params.id]);
     if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');
     const estimates=await fetchReservationEstimates(pool,req.params.id,r.rows[0]);
     return ok(res, formatReservation({...r.rows[0],...estimates}));
