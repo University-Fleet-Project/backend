@@ -29,18 +29,45 @@ router.get('/',requireAuth,async(req,res)=>{
      LIMIT ${limit} OFFSET ${offset}`,
     vals
   );
-  const items = r.rows.map(row => {
-    const pUrl = row.primary_photo_url || null;
-    const { primary_photo_url, ...rest } = row;
-    return {
-      ...rest,
-      imageUrl: pUrl,
-      image_url: pUrl
-    };
-  });
-  return paged(res,items,c.rows[0].total,page,limit);
- }catch(e){console.error(e);return fail(res,500,'VEHICLES_ERROR','Unable to list vehicles.');}
-});
+   const fromTs = (req.query.availableFrom || req.query.from || req.query.startTime) ? new Date(req.query.availableFrom || req.query.from || req.query.startTime).toISOString() : null;
+   const toTs = (req.query.availableTo || req.query.to || req.query.endTime) ? new Date(req.query.availableTo || req.query.to || req.query.endTime).toISOString() : null;
+
+   const items = await Promise.all(r.rows.map(async row => {
+     const pUrl = row.primary_photo_url || null;
+     const { primary_photo_url, ...rest } = row;
+
+     let availSeats = Number(row.seats || 0);
+     if (String(row.vehicle_type || '').trim().toLowerCase() === 'bus' && fromTs && toTs) {
+       try {
+         const bookedRes = await pool.query(
+           `SELECT COALESCE(SUM(passengers), 0)::int AS booked_passengers
+            FROM reservations
+            WHERE vehicle_id = $1
+              AND status IN ('pending', 'approved', 'dispatched', 'active')
+              AND trip_start_timestamp < $3::timestamp
+              AND trip_end_timestamp > $2::timestamp`,
+           [row.vehicle_id, fromTs, toTs]
+         );
+         const booked = Number(bookedRes.rows[0]?.booked_passengers || 0);
+         availSeats = Math.max(0, Number(row.seats || 0) - booked);
+       } catch (bErr) {
+         availSeats = Number(row.seats || 0);
+       }
+     }
+
+     return {
+       ...rest,
+       imageUrl: pUrl,
+       image_url: pUrl,
+       available_seats: availSeats,
+       availableSeats: availSeats,
+       totalCapacity: Number(row.seats || 0)
+     };
+   }));
+
+   return paged(res,items,c.rows[0].total,page,limit);
+  }catch(e){console.error(e);return fail(res,500,'VEHICLES_ERROR','Unable to list vehicles.');}
+ });
 function formatPhoto(p){const u=p.image_url||p.url;return{photoId:p.photo_id,photo_id:p.photo_id,vehicleId:p.vehicle_id,vehicle_id:p.vehicle_id,imageUrl:u,image_url:u,url:u,caption:p.caption||null,createdAt:p.created_at||null,created_at:p.created_at||null};}
 router.get('/:id',requireAuth,async(req,res)=>{
   try{

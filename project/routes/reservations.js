@@ -120,19 +120,49 @@ async function fetchReservationEstimates(clientOrPool, reservationId, reservatio
 function formatReservation(r) {
   if (!r) return r;
   const numericTripId = r.trip_id != null ? Number(r.trip_id) : null;
+  const qr = r.reservation_id ? `FLT-QR-${r.reservation_id}` : null;
+  const totalCap = r.seats != null ? Number(r.seats) : (r.totalCapacity != null ? Number(r.totalCapacity) : null);
+  const availSeats = r.available_seats != null ? Number(r.available_seats) : (r.availableSeats != null ? Number(r.availableSeats) : null);
   return {
     ...r,
     tripType: r.trip_type ?? null,
     tripId: numericTripId,
-    trip_id: numericTripId
+    trip_id: numericTripId,
+    qr_code: qr,
+    qrCode: qr,
+    totalCapacity: totalCap,
+    capacity: totalCap,
+    available_seats: availSeats,
+    availableSeats: availSeats,
+    startTime: r.trip_start_timestamp ?? r.startTime ?? null,
+    endTime: r.trip_end_timestamp ?? r.endTime ?? null
   };
 }
 
  router.post('/',requireAuth,async(req,res)=>{
  const b=req.body; const requesterId=userId(req)||bodyValue(b,'requesterId','requester_id'); const vehicleId=bodyValue(b,'vehicleId','vehicle_id');
- const start=bodyValue(b,'startTime','start_time'), end=bodyValue(b,'endTime','end_time');
+ const start=bodyValue(b,'startTime','start_time'); let end=bodyValue(b,'endTime','end_time');
  const origin=typeof b.origin==='object'?JSON.stringify(b.origin):b.origin, destination=typeof b.destination==='object'?JSON.stringify(b.destination):b.destination;
- if(!requesterId||!vehicleId||!start||!end||!origin||!destination||b.passengers==null||b.distanceKm==null&&b.distance_km==null)return fail(res,400,'VALIDATION_ERROR','vehicleId, startTime, endTime, origin, destination, passengers and distanceKm are required.');
+ const distance=bodyValue(b,'distanceKm','distance_km');
+
+ const vCheck = await pool.query(`SELECT vehicle_type, seats FROM vehicles WHERE vehicle_id=$1`, [vehicleId]);
+ const isBus = vCheck.rows[0] && String(vCheck.rows[0].vehicle_type || '').trim().toLowerCase() === 'bus';
+
+ if (isBus && !end && start) {
+   let durMins = bodyValue(b, 'durationMinutes', 'duration_minutes') ?? b.duration;
+   if (durMins == null && distance != null && !isNaN(Number(distance)) && Number(distance) > 0) {
+     durMins = Math.round((Number(distance) / 40) * 60);
+   }
+   if (durMins == null || isNaN(Number(durMins))) {
+     durMins = 60;
+   }
+   const sTime = new Date(start);
+   if (!isNaN(sTime.getTime())) {
+     end = new Date(sTime.getTime() + Number(durMins) * 60000).toISOString();
+   }
+ }
+
+ if(!requesterId||!vehicleId||!start||!end||!origin||!destination||b.passengers==null||(b.distanceKm==null&&b.distance_km==null))return fail(res,400,'VALIDATION_ERROR','vehicleId, startTime, origin, destination, passengers and distanceKm are required.');
 
  const rawTripType = bodyValue(b, 'tripType', 'trip_type');
  let tripTypeToSave = null;
@@ -146,20 +176,20 @@ function formatReservation(r) {
 
  const sDate=new Date(start), eDate=new Date(end);
  if(Number.isNaN(sDate.getTime())||Number.isNaN(eDate.getTime())||eDate<=sDate)return fail(res,400,'INVALID_TIMEFRAME','startTime and endTime must be valid ISO dates with startTime before endTime.');
- const distance=bodyValue(b,'distanceKm','distance_km');
  const comment=b.comment??b.notes??null;
  const client=await pool.connect();
  try{
    await client.query('BEGIN');
    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`,[String(vehicleId)]);
-   const avail=await checkVehicleAvailability(client,vehicleId,start,end);
+   const avail=await checkVehicleAvailability(client,vehicleId,start,end,{ requestedPassengers: b.passengers });
    if(!avail.available){
      await client.query('ROLLBACK');
      if(avail.code==='VEHICLE_NOT_FOUND')return fail(res,404,'VEHICLE_NOT_FOUND',avail.message);
+     if(avail.code==='CAPACITY_EXCEEDED')return fail(res,409,'CAPACITY_EXCEEDED',avail.message,{ totalCapacity: avail.totalCapacity, bookedPassengers: avail.bookedPassengers, availableSeats: avail.availableSeats, requestedPassengers: avail.requestedPassengers });
      return fail(res,409,avail.code||'VEHICLE_NOT_AVAILABLE',avail.message);
    }
    const v=avail.vehicle;
-   if(Number(b.passengers)>Number(v.seats)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
+   if(!isBus && Number(b.passengers)>Number(v.seats)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
    if(b.load!=null && v.allowed_load_kg!=null && Number(b.load)>Number(v.allowed_load_kg)){await client.query('ROLLBACK');return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');}
    const nominal=Number(v.nominal_l_per_100km||0), est=Number(distance)*nominal/100;
    const id='FLT-RES-'+Date.now();
@@ -281,4 +311,5 @@ router.get('/:id',requireAuth,async(req,res)=>{
 });
 router.post('/:id/cancel',requireAuth,async(req,res)=>{const reason=req.body.reason||'Cancelled by requester';try{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');if(String(r.rows[0].requester_id)!==String(userId(req))&&!['dispatcher','fleet_admin'].includes(req.user.role))return fail(res,403,'FORBIDDEN','You cannot cancel this reservation.');const old=r.rows[0].status;await pool.query(`UPDATE reservations SET status='cancelled',rejection_reason=$1 WHERE reservation_id=$2`,[reason,req.params.id]);await addReservationHistory(req.params.id,old,'cancelled',userId(req),reason);await audit(userId(req),'CANCEL_RESERVATION','reservation',req.params.id,{reason});return ok(res,null,'Reservation cancelled');}catch(e){return fail(res,500,'CANCEL_ERROR','Unable to cancel reservation.');}});
 router.get('/:id/status-history',requireAuth,async(req,res)=>{try{const r=await pool.query(`SELECT * FROM reservation_status_history WHERE reservation_id=$1 ORDER BY changed_at`,[req.params.id]);return ok(res,r.rows);}catch(e){return fail(res,500,'HISTORY_ERROR','Unable to get reservation status history.');}});
+router.get('/:id/qr',requireAuth,async(req,res)=>{try{const r=await pool.query(`SELECT reservation_id, requester_id FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const qr = `FLT-QR-${req.params.id}`;return ok(res,{reservationId:req.params.id,reservation_id:req.params.id,qrCode:qr,qr_code:qr});}catch(e){return fail(res,500,'QR_ERROR','Unable to get reservation QR code.');}});
 module.exports=router;

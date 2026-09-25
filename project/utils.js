@@ -122,6 +122,66 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     };
   }
 
+  const isBus = String(vehicle.vehicle_type || '').trim().toLowerCase() === 'bus';
+
+  if (isBus) {
+    const excludeResClauseBus = options.excludeReservationId ? ' AND reservation_id <> $4' : '';
+    const busParams = options.excludeReservationId
+      ? [vehicleId, startIso, endIso, options.excludeReservationId]
+      : [vehicleId, startIso, endIso];
+
+    const bookedRes = await executor.query(
+      `SELECT COALESCE(SUM(passengers), 0)::int AS booked_passengers
+       FROM reservations
+       WHERE vehicle_id = $1
+         AND status IN ('pending', 'approved', 'dispatched', 'active')
+         AND trip_start_timestamp < $3::timestamp
+         AND trip_end_timestamp > $2::timestamp
+         ${excludeResClauseBus}`,
+      busParams
+    );
+
+    const bookedPassengers = Number(bookedRes.rows[0]?.booked_passengers || 0);
+    const totalCapacity = Number(vehicle.seats || 0);
+    const availableSeats = Math.max(0, totalCapacity - bookedPassengers);
+    const requestedPassengers = options.requestedPassengers != null ? Number(options.requestedPassengers) : 0;
+
+    if (requestedPassengers > 0 && (bookedPassengers + requestedPassengers > totalCapacity)) {
+      return {
+        available: false,
+        code: 'CAPACITY_EXCEEDED',
+        message: 'Requested passengers exceed available capacity on this bus.',
+        serviceStatus,
+        isOperable,
+        vehicle,
+        totalCapacity,
+        bookedPassengers,
+        availableSeats,
+        requestedPassengers,
+        conflicts,
+        maintenanceConflicts,
+        reservationConflicts
+      };
+    }
+
+    return {
+      available: true,
+      code: 'AVAILABLE',
+      message: 'Vehicle is available.',
+      serviceStatus,
+      isOperable,
+      vehicle,
+      totalCapacity,
+      bookedPassengers,
+      availableSeats,
+      conflicts: [],
+      maintenanceConflicts: [],
+      reservationConflicts: [],
+      startTime: startIso,
+      endTime: endIso
+    };
+  }
+
   if (reservationConflicts.length > 0) {
     return {
       available: false,

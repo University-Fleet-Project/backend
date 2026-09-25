@@ -310,7 +310,6 @@ const schemas = {
     required: [
       'vehicleId',
       'startTime',
-      'endTime',
       'origin',
       'destination',
       'passengers',
@@ -319,7 +318,7 @@ const schemas = {
     properties: {
       vehicleId: { type: 'string', example: 'FLT-V-001' },
       startTime: { type: 'string', format: 'date-time', example: '2026-09-22T09:00:00' },
-      endTime: { type: 'string', format: 'date-time', example: '2026-09-22T12:00:00' },
+      endTime: { type: 'string', format: 'date-time', description: 'Optional for Bus reservations; server calculates effective end time if omitted.', example: '2026-09-22T12:00:00' },
       origin: {
         oneOf: [
           { type: 'string', example: 'University Campus' },
