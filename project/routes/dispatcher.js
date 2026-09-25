@@ -65,7 +65,7 @@ router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fle
      tripId=tripRes.rows[0].trip_id;
      await client.query(`UPDATE trips SET driver_id=$1 WHERE trip_id=$2`,[effectiveDriverId,tripId]);
    }else{
-     let odo=Number(v.rows[0]?.current_odometer||0);
+     let odo=Number(v?.current_odometer||0);
      let nt=await client.query(`INSERT INTO trips(reservation_id,driver_id,start_odometer,created_at) VALUES($1,$2,$3,NOW()) RETURNING trip_id`,[req.params.id,effectiveDriverId,odo]);
      tripId=nt.rows[0].trip_id;
    }
