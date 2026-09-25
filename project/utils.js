@@ -32,4 +32,123 @@ async function addTripHistory(id, fromStatus, toStatus, changedBy, reason) {
   await pool.query(`INSERT INTO trip_status_history(trip_id,from_status,to_status,changed_by,reason) VALUES($1,$2,$3,$4,$5)`,[id,fromStatus,toStatus,changedBy?String(changedBy):null,reason||null]);
 }
 function userId(req) { return req.user?.sub ?? req.body?.requesterId ?? req.body?.requester_id ?? null; }
-module.exports={ok,fail,pagination,paged,parseDate,audit,notify,addReservationHistory,addTripHistory,userId};
+async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endTime, options = {}) {
+  const executor = clientOrPool || pool;
+
+  const sDate = parseDate(startTime);
+  const eDate = parseDate(endTime);
+  if (!sDate || !eDate || eDate <= sDate) {
+    return {
+      available: false,
+      code: 'INVALID_TIMEFRAME',
+      message: 'startTime and endTime must be valid ISO dates with startTime before endTime.'
+    };
+  }
+
+  const startIso = sDate.toISOString();
+  const endIso = eDate.toISOString();
+
+  const vRes = await executor.query(
+    `SELECT * FROM vehicles WHERE vehicle_id = $1`,
+    [vehicleId]
+  );
+  if (!vRes.rows[0]) {
+    return {
+      available: false,
+      code: 'VEHICLE_NOT_FOUND',
+      message: 'Vehicle not found.'
+    };
+  }
+
+  const vehicle = vRes.rows[0];
+  const serviceStatus = String(vehicle.service_status || '').trim().toLowerCase();
+  const isOperable = ['available', 'active'].includes(serviceStatus);
+
+  if (!isOperable) {
+    return {
+      available: false,
+      code: 'VEHICLE_NOT_AVAILABLE',
+      message: 'Vehicle is not currently available.',
+      serviceStatus,
+      isOperable,
+      vehicle,
+      conflicts: [],
+      maintenanceConflicts: [],
+      reservationConflicts: []
+    };
+  }
+
+  const maintRes = await executor.query(
+    `SELECT maintenance_id AS id, maintenance_id, start_at AS start, end_at AS "end", 'maintenance' AS status
+     FROM maintenance_records
+     WHERE vehicle_id = $1
+       AND status <> 'completed'
+       AND start_at < $3::timestamp
+       AND end_at > $2::timestamp`,
+    [vehicleId, startIso, endIso]
+  );
+
+  const excludeResClause = options.excludeReservationId ? ' AND reservation_id <> $4' : '';
+  const resParams = options.excludeReservationId
+    ? [vehicleId, startIso, endIso, options.excludeReservationId]
+    : [vehicleId, startIso, endIso];
+
+  const resRes = await executor.query(
+    `SELECT reservation_id AS id, reservation_id, trip_start_timestamp AS start, trip_end_timestamp AS "end", status
+     FROM reservations
+     WHERE vehicle_id = $1
+       AND status IN ('pending', 'approved', 'dispatched', 'active')
+       AND trip_start_timestamp < $3::timestamp
+       AND trip_end_timestamp > $2::timestamp
+       ${excludeResClause}`,
+    resParams
+  );
+
+  const maintenanceConflicts = maintRes.rows;
+  const reservationConflicts = resRes.rows;
+  const conflicts = [...reservationConflicts, ...maintenanceConflicts];
+
+  if (maintenanceConflicts.length > 0) {
+    return {
+      available: false,
+      code: 'VEHICLE_NOT_AVAILABLE',
+      message: 'Vehicle is under maintenance for the selected time.',
+      serviceStatus,
+      isOperable,
+      vehicle,
+      conflicts,
+      maintenanceConflicts,
+      reservationConflicts
+    };
+  }
+
+  if (reservationConflicts.length > 0) {
+    return {
+      available: false,
+      code: 'VEHICLE_NOT_AVAILABLE',
+      message: 'Vehicle is already allocated for the selected time.',
+      serviceStatus,
+      isOperable,
+      vehicle,
+      conflicts,
+      maintenanceConflicts,
+      reservationConflicts
+    };
+  }
+
+  return {
+    available: true,
+    code: 'AVAILABLE',
+    message: 'Vehicle is available.',
+    serviceStatus,
+    isOperable,
+    vehicle,
+    conflicts: [],
+    maintenanceConflicts: [],
+    reservationConflicts: [],
+    startTime: startIso,
+    endTime: endIso
+  };
+}
+
+module.exports={ok,fail,pagination,paged,parseDate,audit,notify,addReservationHistory,addTripHistory,userId,checkVehicleAvailability};

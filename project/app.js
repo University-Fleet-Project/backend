@@ -22,6 +22,7 @@ const maintenance = require('./routes/maintenance');
 const notifications = require('./routes/notifications');
 const reports = require('./routes/reports');
 const meta = require('./routes/meta');
+const admin = require('./routes/admin');
 
 const app = express();
 
@@ -109,6 +110,7 @@ app.use('/api/v1/vehicles', maintenance);
 app.use('/api/v1/maintenance', maintenance);
 app.use('/api/v1/notifications', notifications);
 app.use('/api/v1', meta);
+app.use('/api/v1/admin', admin);
 app.use('/api/v1/reports', reports);
 
 app.use((req, res) =>

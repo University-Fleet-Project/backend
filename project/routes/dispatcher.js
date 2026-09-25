@@ -1,123 +1,42 @@
-const express=require('express'); const {pool}=require('../config/db'); const {ok,fail,pagination,paged,audit,notify,addReservationHistory,addTripHistory,userId}=require('../utils'); const {requireAuth,allowRoles}=require('../middleware/auth');
+const express=require('express'); const {pool}=require('../config/db'); const {ok,fail,pagination,paged,audit,notify,addReservationHistory,addTripHistory,userId,checkVehicleAvailability}=require('../utils'); const {requireAuth,allowRoles}=require('../middleware/auth');
 const router=express.Router();
 
-router.get('/reservations',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const {status='pending',date,vehicleType,search}=req.query;const {page,limit,offset}=pagination(req);const vals=[];const w=[];const add=(s,v)=>{vals.push(v);w.push(s.replace('?',`$${vals.length}`));};if(status)add(`r.status=?`,status);if(vehicleType)add(`r.vehicle_type ILIKE ?`,vehicleType);if(date)add(`DATE(r.trip_start_timestamp)=?`,date);if(search){vals.push(`%${search}%`);w.push(`(r.reservation_id ILIKE $${vals.length} OR r.origin ILIKE $${vals.length} OR r.destination ILIKE $${vals.length})`);}try{const where=w.length?`WHERE ${w.join(' AND ')}`:'';const c=await pool.query(`SELECT COUNT(*)::int total FROM reservations r ${where}`,vals);const r=await pool.query(`SELECT r.* FROM reservations r ${where} ORDER BY r.request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);return paged(res,r.rows,c.rows[0].total,page,limit);}catch(e){return fail(res,500,'DISPATCHER_ERROR','Unable to list dispatcher reservations.');}});
-async function ensureReservationEstimates(clientOrPool, r) {
-  if (!r || !r.reservation_id) return;
-  const resId = String(r.reservation_id);
-
-  try {
-    if (r.route_km != null) {
-      let originObj = r.origin;
-      if (typeof originObj === 'string') {
-        try { originObj = JSON.parse(originObj); } catch { originObj = { name: r.origin }; }
-      }
-      let destObj = r.destination;
-      if (typeof destObj === 'string') {
-        try { destObj = JSON.parse(destObj); } catch { destObj = { name: r.destination }; }
-      }
-
-      const dist = Number(r.route_km);
-      const durationMins = (dist > 0) ? Math.round(dist / 40 * 60) : null;
-
-      await clientOrPool.query(
-        `INSERT INTO route_estimates (reservation_id, origin, destination, distance_km, duration_minutes, provider, snapshot)
-         SELECT CAST($1 AS VARCHAR), $2::jsonb, $3::jsonb, $4::numeric, $5::numeric, 'mock', '{"method": "haversine*1.2"}'::jsonb
-         WHERE NOT EXISTS (SELECT 1 FROM route_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
-        [resId, JSON.stringify(originObj), JSON.stringify(destObj), dist, durationMins]
-      );
-    }
-
-    if (r.estimated_fuel_liters != null) {
-      const estLiters = Number(r.estimated_fuel_liters);
-      const price = Number(r.fuel_price || 15);
-      const estCost = estLiters * price;
-      const minLiters = estLiters * 0.88;
-      const maxLiters = estLiters * 1.18;
-      const assumptions = ['Derived from reservation data'];
-
-      await clientOrPool.query(
-        `INSERT INTO fuel_estimates (reservation_id, vehicle_id, route_distance_km, estimated_liters, estimated_cost, method, min_liters, max_liters, confidence, assumptions, fallback_used)
-         SELECT CAST($1 AS VARCHAR), $2, $3::numeric, $4::numeric, $5::numeric, 'baseline', $6::numeric, $7::numeric, 0.72, $8::jsonb, true
-         WHERE NOT EXISTS (SELECT 1 FROM fuel_estimates WHERE reservation_id = CAST($1 AS VARCHAR))`,
-        [resId, r.vehicle_id, r.route_km != null ? Number(r.route_km) : 0, estLiters, estCost, minLiters, maxLiters, JSON.stringify(assumptions)]
-      );
-    }
-  } catch (e) {
-    console.error('Error ensuring reservation estimates:', e);
-  }
+function formatReservation(r) {
+  if (!r) return r;
+  return {
+    ...r,
+    tripType: r.trip_type ?? null
+  };
 }
 
-async function fetchReservationEstimates(clientOrPool, reservationId, reservationRow = null) {
-  let route_estimate = null;
-  let fuel_estimate = null;
-  try {
-    let routeRes = await clientOrPool.query(
-      `SELECT * FROM route_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
-      [reservationId]
-    );
-    let fuelRes = await clientOrPool.query(
-      `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
-      [reservationId]
-    );
-
-    if ((!routeRes.rows[0] || !fuelRes.rows[0]) && reservationRow) {
-      await ensureReservationEstimates(clientOrPool, reservationRow);
-      if (!routeRes.rows[0]) {
-        routeRes = await clientOrPool.query(
-          `SELECT * FROM route_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
-          [reservationId]
-        );
-      }
-      if (!fuelRes.rows[0]) {
-        fuelRes = await clientOrPool.query(
-          `SELECT * FROM fuel_estimates WHERE reservation_id=$1 ORDER BY created_at DESC LIMIT 1`,
-          [reservationId]
-        );
-      }
+router.get('/reservations',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{
+  const {status='pending',date,vehicleType,search,tripType,trip_type}=req.query;
+  const rawTT = tripType || trip_type;
+  if (rawTT) {
+    const tt = String(rawTT).trim().toLowerCase();
+    if (tt !== 'local' && tt !== 'intercity') {
+      return fail(res, 400, 'INVALID_TRIP_TYPE', 'tripType must be local or intercity.');
     }
-
-    if (routeRes.rows[0]) {
-      const re = routeRes.rows[0];
-      let durationMins = re.duration_minutes != null ? Number(re.duration_minutes) : null;
-      if (durationMins == null && re.distance_km != null && Number(re.distance_km) > 0) {
-        durationMins = Math.round(Number(re.distance_km) / 40 * 60);
-        try {
-          await clientOrPool.query(
-            `UPDATE route_estimates SET duration_minutes = $1 WHERE route_id = $2 AND duration_minutes IS NULL`,
-            [durationMins, re.route_id]
-          );
-        } catch (uErr) {
-          console.error('Error updating duration_minutes on route_estimates:', uErr);
-        }
-      }
-      route_estimate = {
-        distance_km: re.distance_km != null ? Number(Number(re.distance_km).toFixed(2)) : null,
-        duration_minutes: durationMins,
-        provider: re.provider || 'mock'
-      };
-    }
-
-    if (fuelRes.rows[0]) {
-      const fe = fuelRes.rows[0];
-      fuel_estimate = {
-        estimated_liters: fe.estimated_liters != null ? Number(Number(fe.estimated_liters).toFixed(2)) : null,
-        estimated_cost: fe.estimated_cost != null ? Number(Number(fe.estimated_cost).toFixed(2)) : null,
-        min_liters: fe.min_liters != null ? Number(Number(fe.min_liters).toFixed(2)) : null,
-        max_liters: fe.max_liters != null ? Number(Number(fe.max_liters).toFixed(2)) : null,
-        method: fe.method || 'baseline',
-        confidence: fe.confidence != null ? Number(fe.confidence) : 0.72,
-        assumptions: fe.assumptions || null,
-        fallback_used: fe.fallback_used ?? true
-      };
-    }
-  } catch (e) {
-    console.error('Error fetching reservation estimates:', e);
   }
-  return { route_estimate, fuel_estimate };
-}
+  const {page,limit,offset}=pagination(req);
+  const vals=[];
+  const w=[];
+  const add=(s,v)=>{vals.push(v);w.push(s.replace('?',`$${vals.length}`));};
+  if(status)add(`r.status=?`,status);
+  if(vehicleType)add(`r.vehicle_type ILIKE ?`,vehicleType);
+  if(date)add(`DATE(r.trip_start_timestamp)=?`,date);
+  if(rawTT)add(`r.trip_type=?`,String(rawTT).trim().toLowerCase());
+  if(search){vals.push(`%${search}%`);w.push(`(r.reservation_id ILIKE $${vals.length} OR r.origin ILIKE $${vals.length} OR r.destination ILIKE $${vals.length})`);}
+  try{
+    const where=w.length?`WHERE ${w.join(' AND ')}`:'';
+    const c=await pool.query(`SELECT COUNT(*)::int total FROM reservations r ${where}`,vals);
+    const r=await pool.query(`SELECT r.* FROM reservations r ${where} ORDER BY r.request_timestamp DESC LIMIT ${limit} OFFSET ${offset}`,vals);
+    const items = r.rows.map(formatReservation);
+    return paged(res,items,c.rows[0].total,page,limit);
+  }catch(e){return fail(res,500,'DISPATCHER_ERROR','Unable to list dispatcher reservations.');}
+});
 
-router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const estimates=await fetchReservationEstimates(pool,req.params.id,r.rows[0]);return ok(res,{...r.rows[0],...estimates});});
+router.get('/reservations/:id',requireAuth,allowRoles('dispatcher','fleet_admin','auditor'),async(req,res)=>{const r=await pool.query(`SELECT * FROM reservations WHERE reservation_id=$1`,[req.params.id]);if(!r.rows[0])return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');const estimates=await fetchReservationEstimates(pool,req.params.id,r.rows[0]);return ok(res,formatReservation({...r.rows[0],...estimates}));});
 
 router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fleet_admin'),async(req,res)=>{
  const {vehicleId,driverId,reason}=req.body; if(!vehicleId||!driverId)return fail(res,400,'VALIDATION_ERROR','vehicleId and driverId are required.');
@@ -127,15 +46,15 @@ router.post('/reservations/:id/approve',requireAuth,allowRoles('dispatcher','fle
    const rr=await client.query(`SELECT * FROM reservations WHERE reservation_id=$1 FOR UPDATE`,[req.params.id]); if(!rr.rows[0]){await client.query('ROLLBACK');return fail(res,404,'RESERVATION_NOT_FOUND','Reservation not found.');}
    const reservation=rr.rows[0]; if(!['pending','rejected'].includes(reservation.status)){await client.query('ROLLBACK');return fail(res,409,'INVALID_STATUS','Only pending reservations can be approved.');}
    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`,[String(vehicleId)]);
-   const v=await client.query(`SELECT * FROM vehicles WHERE vehicle_id=$1 FOR UPDATE`,[vehicleId]);if(!v.rows[0]){await client.query('ROLLBACK');return fail(res,404,'VEHICLE_NOT_FOUND','Vehicle not found.');}
-   const currentStatus=String(v.rows[0].service_status||'').trim().toLowerCase();
-   if(!['available','active'].includes(currentStatus)){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is not available.');}
-   if(Number(reservation.passengers||0)>Number(v.rows[0].seats||Infinity)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
-   if(reservation.load_kg!=null&&v.rows[0].allowed_load_kg!=null&&Number(reservation.load_kg)>Number(v.rows[0].allowed_load_kg)){await client.query('ROLLBACK');return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');}
-   const maintOverlap=await client.query(`SELECT maintenance_id FROM maintenance_records WHERE vehicle_id=$1 AND status<>'completed' AND start_at<$3 AND end_at>$2 LIMIT 1`,[vehicleId,reservation.trip_start_timestamp,reservation.trip_end_timestamp]);
-   if(maintOverlap.rows[0]){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_NOT_AVAILABLE','Vehicle is under maintenance during the reservation window.');}
-   const overlap=await client.query(`SELECT reservation_id FROM reservations WHERE vehicle_id=$1 AND status IN('approved','active') AND trip_start_timestamp<$3 AND trip_end_timestamp>$2 LIMIT 1`,[vehicleId,reservation.trip_start_timestamp,reservation.trip_end_timestamp]);
-   if(overlap.rows[0]){await client.query('ROLLBACK');return fail(res,409,'VEHICLE_CONFLICT','Vehicle already allocated for an overlapping trip.',{conflictReservationId:overlap.rows[0].reservation_id});}
+   const avail=await checkVehicleAvailability(client,vehicleId,reservation.trip_start_timestamp,reservation.trip_end_timestamp,{excludeReservationId:req.params.id});
+   if(!avail.available){
+     await client.query('ROLLBACK');
+     if(avail.code==='VEHICLE_NOT_FOUND')return fail(res,404,'VEHICLE_NOT_FOUND',avail.message);
+     return fail(res,409,avail.code==='VEHICLE_NOT_AVAILABLE'?'VEHICLE_CONFLICT':avail.code,avail.message,{conflictReservationId:avail.reservationConflicts[0]?.id||null});
+   }
+   const v=avail.vehicle;
+   if(Number(reservation.passengers||0)>Number(v.seats||Infinity)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
+   if(reservation.load_kg!=null&&v.allowed_load_kg!=null&&Number(reservation.load_kg)>Number(v.allowed_load_kg)){await client.query('ROLLBACK');return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');}
    const old=reservation.status;
    await client.query(`UPDATE reservations SET vehicle_id=$1,driver_id=$2,status='approved',approval_timestamp=NOW() WHERE reservation_id=$3`,[vehicleId,driverId,req.params.id]);
    let dr=await client.query(`SELECT driver_id FROM drivers WHERE CAST(driver_id AS TEXT)=$1 OR CAST(user_id AS TEXT)=$1 LIMIT 1`,[String(driverId)]);

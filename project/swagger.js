@@ -172,10 +172,12 @@ const schemas = {
       role: {
         type: 'string',
         enum: ['requester', 'dispatcher', 'driver', 'fleet_admin', 'auditor'],
-        example: 'requester'
+        example: 'driver'
       },
       email: { type: 'string', format: 'email', example: 'ahmed@fleet.demo' },
-      password: { type: 'string', format: 'password', example: 'password' }
+      password: { type: 'string', format: 'password', example: 'password' },
+      licenseNumber: { type: 'string', example: 'DL-123456' },
+      status: { type: 'string', example: 'available' }
     }
   },
 
@@ -349,6 +351,12 @@ const schemas = {
       passengers: { type: 'integer', example: 3 },
       load: { type: 'number', example: 50 },
       distanceKm: { type: 'number', example: 35 },
+      tripType: {
+        type: 'string',
+        enum: ['local', 'intercity'],
+        nullable: true,
+        example: 'local'
+      },
       comment: { type: 'string', example: 'Official trip for university delegation' },
       notes: { type: 'string', example: 'Official trip for university delegation' }
     }
@@ -430,6 +438,7 @@ const schemas = {
       load_kg: { type: 'string', example: '200' },
       requester_id: { type: 'integer', example: 23 },
       comment: { type: 'string', nullable: true },
+      tripType: { type: 'string', enum: ['local', 'intercity'], nullable: true, example: 'local' },
       route_estimate: { $ref: '#/components/schemas/RouteEstimateDetail' },
       fuel_estimate: { $ref: '#/components/schemas/FuelEstimateDetail' }
     }
@@ -437,9 +446,11 @@ const schemas = {
 
   DriverCreateRequest: {
     type: 'object',
-    required: ['userId', 'licenseNumber'],
     properties: {
       userId: { type: 'integer', example: 2 },
+      name: { type: 'string', example: 'Ahmed Driver' },
+      email: { type: 'string', format: 'email', example: 'ahmed.driver@fleet.demo' },
+      password: { type: 'string', format: 'password', example: 'password' },
       status: { type: 'string', example: 'available' },
       licenseNumber: { type: 'string', example: 'DL-123456' }
     }
@@ -697,6 +708,16 @@ add('/api/v1/users', 'get', 'List users', {
 });
 
 add('/api/v1/users', 'post', 'Create user', {
+  roles: ['fleet_admin'],
+  body: bodyRef('UserCreateRequest', {
+    name: 'Ahmed Ali',
+    role: 'requester',
+    email: 'ahmed@fleet.demo',
+    password: 'password'
+  })
+});
+
+add('/api/v1/admin/accounts', 'post', 'Create account (admin compatibility route)', {
   roles: ['fleet_admin'],
   body: bodyRef('UserCreateRequest', {
     name: 'Ahmed Ali',
@@ -977,10 +998,45 @@ add('/api/v1/drivers/{id}/availability', 'get', 'Driver availability', {
   params: [pathParam('id', 'Driver ID')]
 });
 
+add('/api/v1/drivers/apply', 'post', 'Apply for driver account', {
+  auth: false,
+  body: bodyRef('DriverApplyRequest', {
+    name: 'Khaled Hassan',
+    email: 'khaled@fleet.demo',
+    password: 'password123',
+    licenseNumber: 'LIC-778899'
+  })
+});
+
+add('/api/v1/drivers/applications', 'get', 'List driver applications', {
+  roles: ['fleet_admin', 'dispatcher'],
+  params: [
+    queryParam('status', 'string', 'Filter by application status (pending, approved, rejected)'),
+    queryParam('page', 'integer', 'Page number', 1),
+    queryParam('limit', 'integer', 'Page size', 20)
+  ]
+});
+
+add('/api/v1/drivers/applications/{id}/approve', 'post', 'Approve driver application', {
+  roles: ['fleet_admin', 'dispatcher'],
+  params: [pathParam('id', 'Application ID')]
+});
+
+add('/api/v1/drivers/applications/{id}/reject', 'post', 'Reject driver application', {
+  roles: ['fleet_admin', 'dispatcher'],
+  params: [pathParam('id', 'Application ID')],
+  body: bodyRef('DriverRejectRequest', {
+    reason: 'Invalid license documentation'
+  })
+});
+
 /* ----------------------------- Reservations ----------------------------- */
 
 add('/api/v1/reservations', 'get', 'List reservations', {
-  roles: ['dispatcher', 'fleet_admin', 'auditor']
+  roles: ['dispatcher', 'fleet_admin', 'auditor'],
+  params: [
+    queryParam('tripType', 'string', 'Filter by trip type (local or intercity)')
+  ]
 });
 
 add('/api/v1/reservations', 'post', 'Create reservation', {
@@ -992,7 +1048,8 @@ add('/api/v1/reservations', 'post', 'Create reservation', {
     destination: 'Assiut Airport',
     passengers: 3,
     load: 50,
-    distanceKm: 35
+    distanceKm: 35,
+    tripType: 'local'
   })
 });
 
@@ -1001,6 +1058,7 @@ add('/api/v1/reservations/my', 'get', 'My reservations', {
     queryParam('status'),
     queryParam('from', 'string', 'Trip start lower bound'),
     queryParam('to', 'string', 'Trip end upper bound'),
+    queryParam('tripType', 'string', 'Filter by trip type (local or intercity)'),
     queryParam('page', 'integer', 'Page number', 1),
     queryParam('limit', 'integer', 'Page size', 20)
   ]
@@ -1118,6 +1176,11 @@ add('/api/v1/trips/{id}/dispatch', 'post', 'Dispatch trip', {
   })
 });
 
+add('/api/v1/trips/{id}/status', 'patch', 'Update trip status', {
+  roles: ['driver', 'dispatcher', 'fleet_admin'],
+  params: [pathParam('id', 'Trip ID')]
+});
+
 add('/api/v1/trips/{id}/start', 'post', 'Start trip', {
   roles: ['driver'],
   params: [pathParam('id', 'Trip ID')],
@@ -1150,6 +1213,10 @@ add('/api/v1/trips/{id}/locations', 'get', 'Location history', {
 });
 
 add('/api/v1/trips/{id}/location/latest', 'get', 'Latest location', {
+  params: [pathParam('id', 'Trip ID')]
+});
+
+add('/api/v1/trips/{id}/passengers', 'get', 'Trip passengers', {
   params: [pathParam('id', 'Trip ID')]
 });
 

@@ -208,6 +208,20 @@ async function bootstrapDatabase() {
         improvement NUMERIC,
         created_at TIMESTAMP NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS driver_applications (
+        application_id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL,
+        email TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        license_number TEXT,
+        status TEXT NOT NULL DEFAULT 'pending',
+        rejection_reason TEXT,
+        reviewed_by TEXT,
+        reviewed_at TIMESTAMP,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+      );
     `);
 
     await client.query(`
@@ -228,6 +242,7 @@ async function bootstrapDatabase() {
       ON trips(reservation_id);
 
       ALTER TABLE reservations ADD COLUMN IF NOT EXISTS comment TEXT;
+      ALTER TABLE reservations ADD COLUMN IF NOT EXISTS trip_type TEXT;
       ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS created_at TIMESTAMP DEFAULT NOW();
       ALTER TABLE vehicle_photos ADD COLUMN IF NOT EXISTS image_url TEXT;
 

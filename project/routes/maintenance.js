@@ -30,8 +30,12 @@ router.post('/maintenance/:maintenanceId/complete',requireAuth,allowRoles('fleet
 router.post('/:id/complete',requireAuth,allowRoles('fleet_admin','dispatcher'),completeMaintenance);
 
 router.get('/:id',requireAuth,async(req,res)=>{
+  const idStr=String(req.params.id||'').trim();
+  if(!/^[1-9]\d*$/.test(idStr)){
+    return fail(res,400,'INVALID_MAINTENANCE_ID','Maintenance ID must be a positive integer.');
+  }
   try{
-    const r=await pool.query(`SELECT * FROM maintenance_records WHERE maintenance_id=$1`,[req.params.id]);
+    const r=await pool.query(`SELECT * FROM maintenance_records WHERE maintenance_id=$1`,[idStr]);
     if(!r.rows[0])return fail(res,404,'MAINTENANCE_NOT_FOUND','Maintenance record not found.');
     return ok(res,r.rows[0]);
   }catch(e){return fail(res,500,'MAINTENANCE_ERROR','Unable to get maintenance record.');}
