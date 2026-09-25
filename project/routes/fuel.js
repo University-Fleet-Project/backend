@@ -5,6 +5,73 @@ const { requireAuth } = require('../middleware/auth');
 
 const router = express.Router();
 
+/**
+ * Call the AI Fuel Prediction API with retry and timeout protection.
+ * Render free tier services sleep after inactivity, which can cause initial cold-start delays.
+ * A 2-attempt retry loop with a 12-second timeout per attempt ensures reliable responses.
+ */
+async function callAiPredictApi(aiPayload) {
+  const rawUrl = process.env.AI_FUEL_API_URL || 'https://ai-api-3d94.onrender.com/predict';
+  const aiUrl = String(rawUrl).trim();
+  const maxRetries = Math.max(1, Number(process.env.AI_FUEL_MAX_RETRIES || 2));
+  const timeoutMs = Math.max(1000, Number(process.env.AI_FUEL_TIMEOUT_MS || 12000));
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const startMs = Date.now();
+
+    try {
+      console.log(`[AI Fuel] Calling AI API (attempt ${attempt}/${maxRetries}): ${aiUrl}`);
+      const response = await fetch(aiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(aiPayload),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+
+      const elapsedMs = Date.now() - startMs;
+      if (response.ok) {
+        const data = await response.json();
+        const rawLiters = data?.predicted_fuel_liters ?? data?.predictedFuelLiters ?? data?.predicted_fuel;
+        const numLiters = Number(rawLiters);
+
+        if (
+          data &&
+          (data.status === 'success' || data.status === 'ok') &&
+          !isNaN(numLiters) &&
+          numLiters > 0
+        ) {
+          console.log(`[AI Fuel] Success on attempt ${attempt} (${elapsedMs} ms): ${numLiters} L`);
+          return {
+            success: true,
+            predicted_fuel_liters: numLiters,
+            model_version: data.model_version || data.modelVersion || null
+          };
+        } else {
+          console.warn(`[AI Fuel] Unexpected response structure on attempt ${attempt}:`, data);
+        }
+      } else {
+        console.warn(`[AI Fuel] HTTP status ${response.status} from AI API on attempt ${attempt} (${elapsedMs} ms)`);
+      }
+    } catch (err) {
+      clearTimeout(timer);
+      const elapsedMs = Date.now() - startMs;
+      console.warn(`[AI Fuel] Attempt ${attempt} failed (${elapsedMs} ms): ${err.message}`);
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+
+  return { success: false };
+}
+
 router.post('/estimate', requireAuth, async (req, res) => {
   const b = req.body;
   const vehicleId = b.vehicleId || b.vehicle_id;
@@ -63,10 +130,10 @@ router.post('/estimate', requireAuth, async (req, res) => {
 
     const passengers = Number(b.passengers ?? reservation?.passengers ?? 0);
     const loadKg = Number(b.load_kg ?? b.loadKg ?? b.load ?? reservation?.load_kg ?? 0);
-    const trafficBandInput = String(b.trafficBand ?? b.traffic_band ?? 'medium').toLowerCase();
+    const trafficBandInput = String(b.trafficBand ?? b.traffic_band ?? 'medium').trim().toLowerCase();
     const trafficBand = ['low', 'medium', 'high'].includes(trafficBandInput) ? trafficBandInput : 'medium';
 
-    const weather = String(b.weather ?? 'normal').toLowerCase();
+    const weather = String(b.weather ?? 'normal').trim().toLowerCase();
     const acRaw = b.acUsage ?? b.ac_used ?? b.acUsed ?? false;
     const acUsed = Boolean(acRaw);
     const urbanShare = Number(b.urbanShare ?? b.urban_share ?? 0.5);
@@ -76,12 +143,12 @@ router.post('/estimate', requireAuth, async (req, res) => {
     const aiPayload = {
       distance_km: Math.max(0, Number(routeDistanceKm) || 0),
       duration_min: Math.max(0, Number(durationMinutes) || 0),
-      vehicle_type: String(vehicle.vehicle_type || 'Sedan'),
-      make: String(vehicle.make || 'Toyota'),
-      model: String(vehicle.model || 'Corolla'),
+      vehicle_type: String(vehicle.vehicle_type || 'Sedan').trim(),
+      make: String(vehicle.make || 'Toyota').trim(),
+      model: String(vehicle.model || 'Corolla').trim(),
       vehicle_year: Number(vehicle.vehicle_year || 2020),
       seats: Number(vehicle.seats || 5),
-      fuel_type: String(vehicle.fuel_type || 'gasoline'),
+      fuel_type: String(vehicle.fuel_type || 'gasoline').trim(),
       nominal_l_per_100km: Number(vehicle.nominal_l_per_100km || 0),
       allowed_load_kg: Number(vehicle.allowed_load_kg || 0),
       passengers: Math.max(0, Number(passengers) || 0),
@@ -93,53 +160,22 @@ router.post('/estimate', requireAuth, async (req, res) => {
       highway_share: Number(highwayShare) || 0.5
     };
 
-    // 5. Call AI API with AbortController timeout
-    const aiUrl = process.env.AI_FUEL_API_URL || 'https://ai-api-3d94.onrender.com/predict';
+    // 5. Call AI API with automatic retry and timeout
+    const aiRes = await callAiPredictApi(aiPayload);
+
     let method = 'baseline';
     let fallbackUsed = true;
     let estimatedLiters = null;
     let modelVersion = null;
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
-
-    try {
-      const response = await fetch(aiUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Accept': 'application/json'
-        },
-        body: JSON.stringify(aiPayload),
-        signal: controller.signal
-      });
-      clearTimeout(timeout);
-
-      if (response.ok) {
-        const data = await response.json();
-        if (
-          data &&
-          data.status === 'success' &&
-          typeof data.predicted_fuel_liters === 'number' &&
-          !isNaN(data.predicted_fuel_liters)
-        ) {
-          estimatedLiters = Number(data.predicted_fuel_liters);
-          method = 'ai';
-          fallbackUsed = false;
-        } else {
-          console.warn('AI Fuel API returned unexpected response structure:', data);
-        }
-      } else {
-        console.warn(`AI Fuel API returned HTTP status ${response.status}`);
-      }
-    } catch (err) {
-      clearTimeout(timeout);
-      console.warn('AI Fuel API call failed/timed out, using baseline fallback:', err.message);
-    }
-
-    // 6. Baseline fallback logic if AI API call fails or is invalid
-    const nom = Number(vehicle.nominal_l_per_100km || 0);
-    if (estimatedLiters === null) {
+    if (aiRes.success && typeof aiRes.predicted_fuel_liters === 'number' && !isNaN(aiRes.predicted_fuel_liters)) {
+      estimatedLiters = Number(aiRes.predicted_fuel_liters);
+      method = 'ai';
+      fallbackUsed = false;
+      modelVersion = aiRes.model_version || null;
+    } else {
+      // Baseline fallback logic if AI API call fails or times out
+      const nom = Number(vehicle.nominal_l_per_100km || 0);
       const baseLiters = (routeDistanceKm * nom) / 100;
       const trafficFactor = trafficBand === 'high' ? 1.15 : trafficBand === 'low' ? 0.95 : 1;
       const acFactor = acUsed ? 1.08 : 1;
@@ -148,7 +184,8 @@ router.post('/estimate', requireAuth, async (req, res) => {
       fallbackUsed = true;
     }
 
-    // 7. Calculate cost, range, confidence, and assumptions
+    // 6. Calculate cost, range, confidence, and assumptions
+    const nom = Number(vehicle.nominal_l_per_100km || 0);
     const price = Number(process.env.FUEL_PRICE_EGP || 15);
     const estimatedCost = estimatedLiters * price;
     const minLiters = estimatedLiters * 0.88;
@@ -169,7 +206,7 @@ router.post('/estimate', requireAuth, async (req, res) => {
       assumptions.push('Baseline fallback used');
     }
 
-    // 8. Store estimate in fuel_estimates table
+    // 7. Store estimate in fuel_estimates table
     await pool.query(
       `INSERT INTO fuel_estimates(
          reservation_id, vehicle_id, route_distance_km, estimated_liters, estimated_cost,
@@ -192,10 +229,10 @@ router.post('/estimate', requireAuth, async (req, res) => {
       ]
     );
 
-    // 9. Return response matching existing contract
+    // 8. Return response matching existing contract
     return ok(res, {
       method,
-      modelVersion: null,
+      modelVersion,
       estimatedLiters: Number(estimatedLiters.toFixed(2)),
       estimatedCost: Number(estimatedCost.toFixed(2)),
       currency: 'EGP',
@@ -245,4 +282,5 @@ router.get('/estimates', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
 
