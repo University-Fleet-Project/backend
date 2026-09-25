@@ -1,6 +1,248 @@
-const express=require('express');const {pool}=require('../config/db');const {ok,fail,pagination,paged,userId}=require('../utils');const {requireAuth,allowRoles}=require('../middleware/auth');const router=express.Router();
-router.post('/estimate',requireAuth,async(req,res)=>{const b=req.body;try{const v=await pool.query(`SELECT nominal_l_per_100km FROM vehicles WHERE vehicle_id=$1`,[b.vehicleId]);if(!v.rows[0])return fail(res,404,'VEHICLE_NOT_FOUND','Vehicle not found.');const km=Number(b.routeDistanceKm||0),nom=Number(v.rows[0].nominal_l_per_100km||0),liters=km*nom/100;const factor=(b.trafficBand==='high'?1.15:b.trafficBand==='low'?0.95:1)*(b.acUsage?1.08:1);const estimate=liters*factor;const min=estimate*.88,max=estimate*1.18;const price=Number(process.env.FUEL_PRICE_EGP||15);const assumptions=[`Nominal consumption: ${nom} L/100km`,`${b.trafficBand||'medium'} traffic`,b.acUsage?'AC enabled':'AC disabled'];const r=await pool.query(`INSERT INTO fuel_estimates(reservation_id,vehicle_id,route_distance_km,estimated_liters,estimated_cost,method,min_liters,max_liters,confidence,assumptions,fallback_used) VALUES($1,$2,$3,$4,$5,'baseline',$6,$7,$8,$9,true) RETURNING *`,[b.reservationId||null,b.vehicleId,km,estimate,estimate*price,min,max,.72,JSON.stringify(assumptions)]);return ok(res,{method:'baseline',modelVersion:null,estimatedLiters:Number(estimate.toFixed(2)),estimatedCost:Number((estimate*price).toFixed(2)),currency:'EGP',range:{minLiters:Number(min.toFixed(2)),maxLiters:Number(max.toFixed(2))},confidence:.72,assumptions,fallbackUsed:true});}catch(e){console.error(e);return fail(res,500,'FUEL_ERROR','Unable to estimate fuel.');}});
-router.get('/model',requireAuth,async(req,res)=>{const r=await pool.query(`SELECT * FROM fuel_model_registry WHERE status='active' ORDER BY created_at DESC LIMIT 1`);return ok(res,r.rows[0]||{modelVersion:null,status:'baseline',maeLiters:null,mape:null,baselineMaeLiters:null,improvement:0});});
-router.get('/model/metrics',requireAuth,async(req,res)=>{const r=await pool.query(`SELECT * FROM fuel_model_registry ORDER BY created_at DESC`);return ok(res,r.rows);});
-router.get('/estimates',requireAuth,async(req,res)=>{const {page,limit,offset}=pagination(req);const c=await pool.query(`SELECT COUNT(*)::int total FROM fuel_estimates`);const r=await pool.query(`SELECT * FROM fuel_estimates ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`);return paged(res,r.rows,c.rows[0].total,page,limit);});
-module.exports=router;
+const express = require('express');
+const { pool } = require('../config/db');
+const { ok, fail, pagination, paged } = require('../utils');
+const { requireAuth } = require('../middleware/auth');
+
+const router = express.Router();
+
+router.post('/estimate', requireAuth, async (req, res) => {
+  const b = req.body;
+  const vehicleId = b.vehicleId || b.vehicle_id;
+  if (!vehicleId) {
+    return fail(res, 400, 'VALIDATION_ERROR', 'vehicleId is required.');
+  }
+
+  try {
+    // 1. Fetch full vehicle data from PostgreSQL (with specification fallback)
+    const vQuery = await pool.query(
+      `SELECT v.vehicle_id, v.vehicle_type, v.make, v.model, v.vehicle_year, v.seats, v.fuel_type,
+              COALESCE(v.nominal_l_per_100km, s.nominal_l_per_100km, 0) AS nominal_l_per_100km,
+              COALESCE(v.allowed_load_kg, s.allowed_load_kg, 0) AS allowed_load_kg
+       FROM vehicles v
+       LEFT JOIN vehicle_specifications s ON v.vehicle_id = s.vehicle_id
+       WHERE v.vehicle_id = $1`,
+      [vehicleId]
+    );
+
+    if (!vQuery.rows[0]) {
+      return fail(res, 404, 'VEHICLE_NOT_FOUND', 'Vehicle not found.');
+    }
+    const vehicle = vQuery.rows[0];
+
+    // 2. Fetch reservation details if reservationId is supplied
+    const reservationId = b.reservationId || b.reservation_id || null;
+    let reservation = null;
+    if (reservationId) {
+      const rQuery = await pool.query(
+        `SELECT passengers, load_kg, trip_start_timestamp, trip_end_timestamp, route_km
+         FROM reservations WHERE reservation_id = $1`,
+        [reservationId]
+      );
+      if (rQuery.rows[0]) {
+        reservation = rQuery.rows[0];
+      }
+    }
+
+    // 3. Resolve input values from request or reservation defaults
+    const routeDistanceKm = Number(
+      b.routeDistanceKm ?? b.distanceKm ?? b.distance_km ?? reservation?.route_km ?? 0
+    );
+
+    let durationMinutes = b.durationMinutes ?? b.duration_min ?? b.duration;
+    if (durationMinutes == null && reservation?.trip_start_timestamp && reservation?.trip_end_timestamp) {
+      const sTs = new Date(reservation.trip_start_timestamp).getTime();
+      const eTs = new Date(reservation.trip_end_timestamp).getTime();
+      if (!isNaN(sTs) && !isNaN(eTs) && eTs > sTs) {
+        durationMinutes = Math.round((eTs - sTs) / 60000);
+      }
+    }
+    if (durationMinutes == null && routeDistanceKm > 0) {
+      durationMinutes = Math.round((routeDistanceKm / 40) * 60);
+    }
+    durationMinutes = Number(durationMinutes || 0);
+
+    const passengers = Number(b.passengers ?? reservation?.passengers ?? 0);
+    const loadKg = Number(b.load_kg ?? b.loadKg ?? b.load ?? reservation?.load_kg ?? 0);
+    const trafficBandInput = String(b.trafficBand ?? b.traffic_band ?? 'medium').toLowerCase();
+    const trafficBand = ['low', 'medium', 'high'].includes(trafficBandInput) ? trafficBandInput : 'medium';
+
+    const weather = String(b.weather ?? 'normal').toLowerCase();
+    const acRaw = b.acUsage ?? b.ac_used ?? b.acUsed ?? false;
+    const acUsed = Boolean(acRaw);
+    const urbanShare = Number(b.urbanShare ?? b.urban_share ?? 0.5);
+    const highwayShare = Number(b.highwayShare ?? b.highway_share ?? 0.5);
+
+    // 4. Construct AI request payload
+    const aiPayload = {
+      distance_km: Math.max(0, Number(routeDistanceKm) || 0),
+      duration_min: Math.max(0, Number(durationMinutes) || 0),
+      vehicle_type: String(vehicle.vehicle_type || 'Sedan'),
+      make: String(vehicle.make || 'Toyota'),
+      model: String(vehicle.model || 'Corolla'),
+      vehicle_year: Number(vehicle.vehicle_year || 2020),
+      seats: Number(vehicle.seats || 5),
+      fuel_type: String(vehicle.fuel_type || 'gasoline'),
+      nominal_l_per_100km: Number(vehicle.nominal_l_per_100km || 0),
+      allowed_load_kg: Number(vehicle.allowed_load_kg || 0),
+      passengers: Math.max(0, Number(passengers) || 0),
+      load_kg: Math.max(0, Number(loadKg) || 0),
+      traffic_band: trafficBand,
+      weather: weather,
+      ac_used: acUsed ? 1 : 0,
+      urban_share: Number(urbanShare) || 0.5,
+      highway_share: Number(highwayShare) || 0.5
+    };
+
+    // 5. Call AI API with AbortController timeout
+    const aiUrl = process.env.AI_FUEL_API_URL || 'https://ai-api-3d94.onrender.com/predict';
+    let method = 'baseline';
+    let fallbackUsed = true;
+    let estimatedLiters = null;
+    let modelVersion = null;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+
+    try {
+      const response = await fetch(aiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        },
+        body: JSON.stringify(aiPayload),
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+
+      if (response.ok) {
+        const data = await response.json();
+        if (
+          data &&
+          data.status === 'success' &&
+          typeof data.predicted_fuel_liters === 'number' &&
+          !isNaN(data.predicted_fuel_liters)
+        ) {
+          estimatedLiters = Number(data.predicted_fuel_liters);
+          method = 'ai';
+          fallbackUsed = false;
+        } else {
+          console.warn('AI Fuel API returned unexpected response structure:', data);
+        }
+      } else {
+        console.warn(`AI Fuel API returned HTTP status ${response.status}`);
+      }
+    } catch (err) {
+      clearTimeout(timeout);
+      console.warn('AI Fuel API call failed/timed out, using baseline fallback:', err.message);
+    }
+
+    // 6. Baseline fallback logic if AI API call fails or is invalid
+    const nom = Number(vehicle.nominal_l_per_100km || 0);
+    if (estimatedLiters === null) {
+      const baseLiters = (routeDistanceKm * nom) / 100;
+      const trafficFactor = trafficBand === 'high' ? 1.15 : trafficBand === 'low' ? 0.95 : 1;
+      const acFactor = acUsed ? 1.08 : 1;
+      estimatedLiters = baseLiters * trafficFactor * acFactor;
+      method = 'baseline';
+      fallbackUsed = true;
+    }
+
+    // 7. Calculate cost, range, confidence, and assumptions
+    const price = Number(process.env.FUEL_PRICE_EGP || 15);
+    const estimatedCost = estimatedLiters * price;
+    const minLiters = estimatedLiters * 0.88;
+    const maxLiters = estimatedLiters * 1.18;
+    const confidence = method === 'ai' ? 0.85 : 0.72;
+
+    const assumptions = [];
+    if (method === 'ai') {
+      assumptions.push('AI fuel prediction');
+    }
+    assumptions.push(`Nominal consumption: ${nom} L/100km`);
+    assumptions.push(`${trafficBand} traffic`);
+    assumptions.push(acUsed ? 'AC enabled' : 'AC disabled');
+    if (weather && weather !== 'normal') {
+      assumptions.push(`Weather: ${weather}`);
+    }
+    if (fallbackUsed && method === 'baseline') {
+      assumptions.push('Baseline fallback used');
+    }
+
+    // 8. Store estimate in fuel_estimates table
+    await pool.query(
+      `INSERT INTO fuel_estimates(
+         reservation_id, vehicle_id, route_distance_km, estimated_liters, estimated_cost,
+         method, model_version, min_liters, max_liters, confidence, assumptions, fallback_used
+       ) VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+       RETURNING *`,
+      [
+        reservationId,
+        vehicleId,
+        routeDistanceKm,
+        estimatedLiters,
+        estimatedCost,
+        method,
+        modelVersion,
+        minLiters,
+        maxLiters,
+        confidence,
+        JSON.stringify(assumptions),
+        fallbackUsed
+      ]
+    );
+
+    // 9. Return response matching existing contract
+    return ok(res, {
+      method,
+      modelVersion: null,
+      estimatedLiters: Number(estimatedLiters.toFixed(2)),
+      estimatedCost: Number(estimatedCost.toFixed(2)),
+      currency: 'EGP',
+      range: {
+        minLiters: Number(minLiters.toFixed(2)),
+        maxLiters: Number(maxLiters.toFixed(2))
+      },
+      confidence,
+      assumptions,
+      fallbackUsed
+    });
+  } catch (e) {
+    console.error('Fuel estimate error:', e);
+    return fail(res, 500, 'FUEL_ERROR', 'Unable to estimate fuel.');
+  }
+});
+
+router.get('/model', requireAuth, async (req, res) => {
+  const r = await pool.query(
+    `SELECT * FROM fuel_model_registry WHERE status='active' ORDER BY created_at DESC LIMIT 1`
+  );
+  return ok(
+    res,
+    r.rows[0] || {
+      modelVersion: null,
+      status: 'baseline',
+      maeLiters: null,
+      mape: null,
+      baselineMaeLiters: null,
+      improvement: 0
+    }
+  );
+});
+
+router.get('/model/metrics', requireAuth, async (req, res) => {
+  const r = await pool.query(`SELECT * FROM fuel_model_registry ORDER BY created_at DESC`);
+  return ok(res, r.rows);
+});
+
+router.get('/estimates', requireAuth, async (req, res) => {
+  const { page, limit, offset } = pagination(req);
+  const c = await pool.query(`SELECT COUNT(*)::int total FROM fuel_estimates`);
+  const r = await pool.query(
+    `SELECT * FROM fuel_estimates ORDER BY created_at DESC LIMIT ${limit} OFFSET ${offset}`
+  );
+  return paged(res, r.rows, c.rows[0].total, page, limit);
+});
+
+module.exports = router;
+

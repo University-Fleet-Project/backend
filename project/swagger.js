@@ -507,12 +507,16 @@ const schemas = {
       reservationId: { type: 'string', nullable: true, example: 'FLT-RES-0001' },
       vehicleId: { type: 'string', example: 'FLT-V-001' },
       routeDistanceKm: { type: 'number', example: 120 },
+      durationMinutes: { type: 'number', nullable: true, example: 90 },
       trafficBand: {
         type: 'string',
         enum: ['low', 'medium', 'high'],
         example: 'medium'
       },
-      acUsage: { type: 'boolean', example: true }
+      acUsage: { type: 'boolean', example: true },
+      weather: { type: 'string', example: 'normal' },
+      urbanShare: { type: 'number', example: 0.5 },
+      highwayShare: { type: 'number', example: 0.5 }
     }
   },
 
@@ -1129,13 +1133,18 @@ add('/api/v1/routes/estimate', 'post', 'Estimate route', {
 
 /* ----------------------------- Fuel ----------------------------- */
 
-add('/api/v1/fuel/estimate', 'post', 'Estimate fuel', {
+add('/api/v1/fuel/estimate', 'post', 'Estimate fuel (using AI prediction with baseline fallback)', {
+  description: 'Calculates fuel estimate using the external AI prediction service if available, otherwise falls back to baseline formula.',
   body: bodyRef('FuelEstimateRequest', {
     reservationId: 'FLT-RES-0001',
     vehicleId: 'FLT-V-001',
     routeDistanceKm: 120,
+    durationMinutes: 90,
     trafficBand: 'medium',
-    acUsage: true
+    acUsage: true,
+    weather: 'normal',
+    urbanShare: 0.5,
+    highwayShare: 0.5
   })
 });
 
