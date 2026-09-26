@@ -44,9 +44,10 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     };
   }
 
+  const vId = String(vehicleId || '').trim();
   const vRes = await executor.query(
-    `SELECT * FROM vehicles WHERE vehicle_id = $1`,
-    [vehicleId]
+    `SELECT * FROM vehicles WHERE vehicle_id = $1 OR LOWER(vehicle_id) = LOWER($1) LIMIT 1`,
+    [vId]
   );
   if (!vRes.rows[0]) {
     return {
@@ -57,6 +58,7 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
   }
 
   const vehicle = vRes.rows[0];
+  const canonicalVehicleId = vehicle.vehicle_id;
   const isBus = String(vehicle.vehicle_type || '').trim().toLowerCase() === 'bus';
 
   let eDate = endTime ? parseDate(endTime) : null;
@@ -109,13 +111,13 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
        AND status <> 'completed'
        AND start_at < $3::timestamp
        AND end_at > $2::timestamp`,
-    [vehicleId, startIso, endIso]
+    [canonicalVehicleId, startIso, endIso]
   );
 
   const excludeResClause = options.excludeReservationId ? ' AND reservation_id <> $4' : '';
   const resParams = options.excludeReservationId
-    ? [vehicleId, startIso, endIso, options.excludeReservationId]
-    : [vehicleId, startIso, endIso];
+    ? [canonicalVehicleId, startIso, endIso, options.excludeReservationId]
+    : [canonicalVehicleId, startIso, endIso];
 
   const resRes = await executor.query(
     `SELECT reservation_id AS id, reservation_id, trip_start_timestamp AS start, trip_end_timestamp AS "end", status
@@ -148,11 +150,16 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     };
   }
 
+  const requestedPassengers = options.requestedPassengers != null
+    ? Number(options.requestedPassengers)
+    : (options.passengers != null ? Number(options.passengers) : 0);
+  const totalCapacity = Number(vehicle.seats || 0);
+
   if (isBus) {
     const excludeResClauseBus = options.excludeReservationId ? ' AND reservation_id <> $4' : '';
     const busParams = options.excludeReservationId
-      ? [vehicleId, startIso, endIso, options.excludeReservationId]
-      : [vehicleId, startIso, endIso];
+      ? [canonicalVehicleId, startIso, endIso, options.excludeReservationId]
+      : [canonicalVehicleId, startIso, endIso];
 
     const bookedRes = await executor.query(
       `SELECT COALESCE(SUM(passengers), 0)::int AS booked_passengers
@@ -166,11 +173,7 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     );
 
     const bookedPassengers = Number(bookedRes.rows[0]?.booked_passengers || 0);
-    const totalCapacity = Number(vehicle.seats || 0);
     const availableSeats = Math.max(0, totalCapacity - bookedPassengers);
-    const requestedPassengers = options.requestedPassengers != null
-      ? Number(options.requestedPassengers)
-      : (options.passengers != null ? Number(options.passengers) : 0);
 
     if (requestedPassengers > 0 && (bookedPassengers + requestedPassengers > totalCapacity)) {
       return {
@@ -231,6 +234,24 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     };
   }
 
+  if (requestedPassengers > 0 && requestedPassengers > totalCapacity) {
+    return {
+      available: false,
+      code: 'PASSENGER_CAPACITY_EXCEEDED',
+      message: 'Passenger count exceeds vehicle capacity.',
+      serviceStatus,
+      isOperable,
+      vehicle,
+      totalCapacity,
+      requestedPassengers,
+      conflicts,
+      maintenanceConflicts,
+      reservationConflicts,
+      startTime: startIso,
+      endTime: endIso
+    };
+  }
+
   if (reservationConflicts.length > 0) {
     return {
       available: false,
@@ -239,6 +260,8 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
       serviceStatus,
       isOperable,
       vehicle,
+      totalCapacity,
+      requestedPassengers,
       conflicts,
       maintenanceConflicts,
       reservationConflicts,
@@ -254,6 +277,8 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     serviceStatus,
     isOperable,
     vehicle,
+    totalCapacity,
+    requestedPassengers,
     conflicts: [],
     maintenanceConflicts: [],
     reservationConflicts: [],

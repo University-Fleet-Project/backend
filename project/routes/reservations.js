@@ -144,25 +144,9 @@ function formatReservation(r) {
  const start=bodyValue(b,'startTime','start_time'); let end=bodyValue(b,'endTime','end_time');
  const origin=typeof b.origin==='object'?JSON.stringify(b.origin):b.origin, destination=typeof b.destination==='object'?JSON.stringify(b.destination):b.destination;
  const distance=bodyValue(b,'distanceKm','distance_km');
+ const durMins=bodyValue(b,'durationMinutes','duration_minutes')??b.duration;
 
- const vCheck = await pool.query(`SELECT vehicle_type, seats FROM vehicles WHERE vehicle_id=$1`, [vehicleId]);
- const isBus = vCheck.rows[0] && String(vCheck.rows[0].vehicle_type || '').trim().toLowerCase() === 'bus';
-
- if (isBus && !end && start) {
-   let durMins = bodyValue(b, 'durationMinutes', 'duration_minutes') ?? b.duration;
-   if (durMins == null && distance != null && !isNaN(Number(distance)) && Number(distance) > 0) {
-     durMins = Math.round((Number(distance) / 40) * 60);
-   }
-   if (durMins == null || isNaN(Number(durMins))) {
-     durMins = 60;
-   }
-   const sTime = new Date(start);
-   if (!isNaN(sTime.getTime())) {
-     end = new Date(sTime.getTime() + Number(durMins) * 60000).toISOString();
-   }
- }
-
- if(!requesterId||!vehicleId||!start||!end||!origin||!destination||b.passengers==null||(b.distanceKm==null&&b.distance_km==null))return fail(res,400,'VALIDATION_ERROR','vehicleId, startTime, origin, destination, passengers and distanceKm are required.');
+ if(!requesterId||!vehicleId||!start||!origin||!destination||b.passengers==null||(b.distanceKm==null&&b.distance_km==null))return fail(res,400,'VALIDATION_ERROR','vehicleId, startTime, origin, destination, passengers and distanceKm are required.');
 
  const rawTripType = bodyValue(b, 'tripType', 'trip_type');
  let tripTypeToSave = null;
@@ -174,22 +158,21 @@ function formatReservation(r) {
    tripTypeToSave = tt;
  }
 
- const sDate=new Date(start), eDate=new Date(end);
- if(Number.isNaN(sDate.getTime())||Number.isNaN(eDate.getTime())||eDate<=sDate)return fail(res,400,'INVALID_TIMEFRAME','startTime and endTime must be valid ISO dates with startTime before endTime.');
  const comment=b.comment??b.notes??null;
  const client=await pool.connect();
  try{
    await client.query('BEGIN');
    await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`,[String(vehicleId)]);
-   const avail=await checkVehicleAvailability(client,vehicleId,start,end,{ requestedPassengers: b.passengers });
+   const avail=await checkVehicleAvailability(client,vehicleId,start,end,{ requestedPassengers: b.passengers, distanceKm: distance, durationMinutes: durMins });
    if(!avail.available){
      await client.query('ROLLBACK');
      if(avail.code==='VEHICLE_NOT_FOUND')return fail(res,404,'VEHICLE_NOT_FOUND',avail.message);
+     if(avail.code==='INVALID_TIMEFRAME')return fail(res,400,'INVALID_TIMEFRAME',avail.message);
+     if(avail.code==='PASSENGER_CAPACITY_EXCEEDED')return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED',avail.message);
      if(avail.code==='CAPACITY_EXCEEDED')return fail(res,409,'CAPACITY_EXCEEDED',avail.message,{ totalCapacity: avail.totalCapacity, bookedPassengers: avail.bookedPassengers, availableSeats: avail.availableSeats, requestedPassengers: avail.requestedPassengers });
      return fail(res,409,avail.code||'VEHICLE_NOT_AVAILABLE',avail.message);
    }
    const v=avail.vehicle;
-   if(!isBus && Number(b.passengers)>Number(v.seats)){await client.query('ROLLBACK');return fail(res,400,'PASSENGER_CAPACITY_EXCEEDED','Passenger count exceeds vehicle capacity.');}
    if(b.load!=null && v.allowed_load_kg!=null && Number(b.load)>Number(v.allowed_load_kg)){await client.query('ROLLBACK');return fail(res,400,'LOAD_CAPACITY_EXCEEDED','Load exceeds vehicle capacity.');}
    const nominal=Number(v.nominal_l_per_100km||0), est=Number(distance)*nominal/100;
    const id='FLT-RES-'+Date.now();
