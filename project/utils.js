@@ -36,17 +36,13 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
   const executor = clientOrPool || pool;
 
   const sDate = parseDate(startTime);
-  const eDate = parseDate(endTime);
-  if (!sDate || !eDate || eDate <= sDate) {
+  if (!sDate) {
     return {
       available: false,
       code: 'INVALID_TIMEFRAME',
-      message: 'startTime and endTime must be valid ISO dates with startTime before endTime.'
+      message: 'startTime must be a valid ISO date.'
     };
   }
-
-  const startIso = sDate.toISOString();
-  const endIso = eDate.toISOString();
 
   const vRes = await executor.query(
     `SELECT * FROM vehicles WHERE vehicle_id = $1`,
@@ -61,6 +57,32 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
   }
 
   const vehicle = vRes.rows[0];
+  const isBus = String(vehicle.vehicle_type || '').trim().toLowerCase() === 'bus';
+
+  let eDate = endTime ? parseDate(endTime) : null;
+  if (!eDate && isBus) {
+    let durMins = options.durationMinutes ?? options.duration_minutes ?? options.duration;
+    const distance = options.distanceKm ?? options.distance_km;
+    if (durMins == null && distance != null && !isNaN(Number(distance)) && Number(distance) > 0) {
+      durMins = Math.round((Number(distance) / 40) * 60);
+    }
+    if (durMins == null || isNaN(Number(durMins))) {
+      durMins = 60;
+    }
+    eDate = new Date(sDate.getTime() + Number(durMins) * 60000);
+  }
+
+  if (!eDate || Number.isNaN(eDate.getTime()) || eDate <= sDate) {
+    return {
+      available: false,
+      code: 'INVALID_TIMEFRAME',
+      message: 'startTime and endTime must be valid ISO dates with startTime before endTime.'
+    };
+  }
+
+  const startIso = sDate.toISOString();
+  const endIso = eDate.toISOString();
+
   const serviceStatus = String(vehicle.service_status || '').trim().toLowerCase();
   const isOperable = ['available', 'active'].includes(serviceStatus);
 
@@ -74,7 +96,9 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
       vehicle,
       conflicts: [],
       maintenanceConflicts: [],
-      reservationConflicts: []
+      reservationConflicts: [],
+      startTime: startIso,
+      endTime: endIso
     };
   }
 
@@ -118,11 +142,11 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
       vehicle,
       conflicts,
       maintenanceConflicts,
-      reservationConflicts
+      reservationConflicts,
+      startTime: startIso,
+      endTime: endIso
     };
   }
-
-  const isBus = String(vehicle.vehicle_type || '').trim().toLowerCase() === 'bus';
 
   if (isBus) {
     const excludeResClauseBus = options.excludeReservationId ? ' AND reservation_id <> $4' : '';
@@ -144,7 +168,9 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
     const bookedPassengers = Number(bookedRes.rows[0]?.booked_passengers || 0);
     const totalCapacity = Number(vehicle.seats || 0);
     const availableSeats = Math.max(0, totalCapacity - bookedPassengers);
-    const requestedPassengers = options.requestedPassengers != null ? Number(options.requestedPassengers) : 0;
+    const requestedPassengers = options.requestedPassengers != null
+      ? Number(options.requestedPassengers)
+      : (options.passengers != null ? Number(options.passengers) : 0);
 
     if (requestedPassengers > 0 && (bookedPassengers + requestedPassengers > totalCapacity)) {
       return {
@@ -160,7 +186,29 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
         requestedPassengers,
         conflicts,
         maintenanceConflicts,
-        reservationConflicts
+        reservationConflicts,
+        startTime: startIso,
+        endTime: endIso
+      };
+    }
+
+    if (availableSeats <= 0) {
+      return {
+        available: false,
+        code: 'CAPACITY_EXCEEDED',
+        message: 'No seats available on this bus for the selected time.',
+        serviceStatus,
+        isOperable,
+        vehicle,
+        totalCapacity,
+        bookedPassengers,
+        availableSeats,
+        requestedPassengers,
+        conflicts,
+        maintenanceConflicts,
+        reservationConflicts,
+        startTime: startIso,
+        endTime: endIso
       };
     }
 
@@ -174,6 +222,7 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
       totalCapacity,
       bookedPassengers,
       availableSeats,
+      requestedPassengers,
       conflicts: [],
       maintenanceConflicts: [],
       reservationConflicts: [],
@@ -192,7 +241,9 @@ async function checkVehicleAvailability(clientOrPool, vehicleId, startTime, endT
       vehicle,
       conflicts,
       maintenanceConflicts,
-      reservationConflicts
+      reservationConflicts,
+      startTime: startIso,
+      endTime: endIso
     };
   }
 
